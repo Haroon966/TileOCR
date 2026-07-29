@@ -1,14 +1,17 @@
 package com.paperpanorama.ocr.session
 
 import android.app.Application
+import android.graphics.Bitmap
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.paperpanorama.ocr.camera.CaptureStore
+import com.paperpanorama.ocr.capture.CoverageTracker
 import com.paperpanorama.ocr.doc.OpenCvDocumentProcessor
 import com.paperpanorama.ocr.doc.QuadMath
 import com.paperpanorama.ocr.domain.CaptureFrame
 import com.paperpanorama.ocr.domain.CaptureMode
+import com.paperpanorama.ocr.domain.CoverageSnapshot
 import com.paperpanorama.ocr.domain.DocQuad
 import com.paperpanorama.ocr.domain.EnhancePreset
 import com.paperpanorama.ocr.domain.SavedScan
@@ -55,11 +58,19 @@ data class ScanUiState(
     val library: List<SavedScan> = emptyList(),
     /** When viewing a saved scan, Adjust is unavailable without a mosaic. */
     val libraryScanId: String? = null,
+    /** Guided scan coach (coverage-driven). */
+    val coverage: CoverageSnapshot = CoverageSnapshot.Idle,
+    val isIngestingCapture: Boolean = false,
+    /** Coarse live mosaic of locked page cells (camera HUD). */
+    val mosaicThumb: Bitmap? = null,
+    /** Fixed 2×2 tile slots (TL, TR, BL, BR). Null = not captured yet. */
+    val tileSlots: List<CaptureFrame?> = listOf(null, null, null, null),
 )
 
 class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
     private val store = CaptureStore(app)
     private val library = ScanLibrary(app)
+    private val coverageTracker = CoverageTracker(app)
     private val normalizer = OpenCvFrameNormalizer(app)
     private val stitcher = OpenCvDocumentStitcher(app, normalizer)
     private val docProcessor = OpenCvDocumentProcessor(app)
@@ -100,17 +111,38 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setMode(mode: CaptureMode) {
         _state.update { it.copy(mode = mode) }
+        if (mode == CaptureMode.Single) {
+            coverageTracker.reset()
+            _state.update {
+                it.copy(
+                    coverage = CoverageSnapshot.Idle,
+                    mosaicThumb = null,
+                    tileSlots = listOf(null, null, null, null),
+                )
+            }
+        } else if (_state.value.frames.isEmpty()) {
+            coverageTracker.reset()
+            _state.update {
+                it.copy(
+                    coverage = CoverageSnapshot.Idle,
+                    mosaicThumb = null,
+                    tileSlots = listOf(null, null, null, null),
+                )
+            }
+        }
     }
 
     fun startFreshSession() {
         stitchJob?.cancel()
         prepareJob?.cancel()
         cancelStitch = false
+        coverageTracker.reset()
         val id = store.newSessionId()
         _state.value = ScanUiState(
             sessionId = id,
-            mode = _state.value.mode,
+            mode = CaptureMode.Panorama,
             library = _state.value.library,
+            coverage = CoverageSnapshot.Idle,
         )
     }
 
@@ -125,20 +157,33 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
 
     fun openScan(id: String) {
         viewModelScope.launch {
-            val scan = withContext(Dispatchers.IO) { library.get(id) } ?: return@launch
-            _state.update {
-                it.copy(
-                    pageUri = scan.pageUri,
-                    pageWidth = scan.width,
-                    pageHeight = scan.height,
-                    mosaicUri = scan.mosaicUri,
-                    libraryScanId = scan.id,
-                    docQuad = null,
-                    prepareError = null,
-                )
-            }
+            applyLibraryScan(id) ?: return@launch
             navChannel.send(ScanNavEvent.ToOcrReady)
         }
+    }
+
+    /** Swipe between gallery pages — update viewer without re-navigating. */
+    fun selectLibraryScan(id: String) {
+        if (_state.value.libraryScanId == id) return
+        viewModelScope.launch {
+            applyLibraryScan(id)
+        }
+    }
+
+    private suspend fun applyLibraryScan(id: String): SavedScan? {
+        val scan = withContext(Dispatchers.IO) { library.get(id) } ?: return null
+        _state.update {
+            it.copy(
+                pageUri = scan.pageUri,
+                pageWidth = scan.width,
+                pageHeight = scan.height,
+                mosaicUri = scan.mosaicUri,
+                libraryScanId = scan.id,
+                docQuad = null,
+                prepareError = null,
+            )
+        }
+        return scan
     }
 
     /**
@@ -180,28 +225,115 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * Delete from gallery viewer: show neighbor page, or return home if library empty.
+     */
+    fun deleteLibraryScanFromViewer(id: String) {
+        viewModelScope.launch {
+            val before = _state.value.library
+            val idx = before.indexOfFirst { it.id == id }
+            withContext(Dispatchers.IO) { library.delete(id) }
+            val scans = withContext(Dispatchers.IO) { library.list() }
+            if (scans.isEmpty()) {
+                _state.update {
+                    it.copy(
+                        library = emptyList(),
+                        libraryScanId = null,
+                        pageUri = null,
+                        mosaicUri = null,
+                        pageWidth = 0,
+                        pageHeight = 0,
+                    )
+                }
+                navChannel.send(ScanNavEvent.ToHome)
+                return@launch
+            }
+            val next = when {
+                idx < 0 -> scans.first()
+                idx < scans.size -> scans[idx]
+                else -> scans.last()
+            }
+            applyLibraryScan(next.id)
+            _state.update { it.copy(library = scans) }
+        }
+    }
+
     fun addCapturedFile(file: java.io.File, displayRotation: Int) {
-        val index = _state.value.frames.size
-        val frame = store.frameFromFile(index, file, displayRotation)
-        val warn = if (frame.featureCount in 0 until MIN_FEATURES) {
-            "Need more text or texture in frame"
-        } else {
-            null
-        }
-        _state.update {
-            it.copy(
-                frames = it.frames + frame,
-                featureWarn = warn,
-            )
-        }
         if (_state.value.mode == CaptureMode.Single) {
+            val index = _state.value.frames.size
+            val frame = store.frameFromFile(index, file, displayRotation)
+            _state.update {
+                it.copy(
+                    frames = listOf(frame),
+                    featureWarn = null,
+                    coverage = CoverageSnapshot.Idle,
+                )
+            }
             beginStitch()
+            return
+        }
+
+        viewModelScope.launch {
+            _state.update { it.copy(isIngestingCapture = true) }
+            val targetTile = _state.value.coverage.activeTileIndex
+            val result = withContext(Dispatchers.Default) {
+                coverageTracker.ingest(Uri.fromFile(file), forceTileIndex = targetTile)
+            }
+            if (!result.accepted) {
+                file.delete()
+                _state.update {
+                    it.copy(
+                        isIngestingCapture = false,
+                        coverage = result.snapshot,
+                        featureWarn = result.snapshot.nextHint,
+                        mosaicThumb = coverageTracker.mosaicThumbnail(),
+                    )
+                }
+                return@launch
+            }
+            val frame = withContext(Dispatchers.IO) {
+                store.frameFromFile(result.tileIndex, file, displayRotation)
+            }
+            _state.update { s ->
+                val slots = s.tileSlots.toMutableList()
+                while (slots.size < 4) slots.add(null)
+                slots[result.tileIndex] = frame
+                val ordered = slots.mapIndexedNotNull { i, f -> f?.copy(index = i) }
+                s.copy(
+                    tileSlots = slots,
+                    frames = ordered,
+                    featureWarn = null,
+                    coverage = result.snapshot,
+                    isIngestingCapture = false,
+                    mosaicThumb = coverageTracker.mosaicThumbnail(),
+                )
+            }
         }
     }
 
     fun removeFrameAt(index: Int) {
         _state.update { s ->
-            s.copy(frames = s.frames.filterIndexed { i, _ -> i != index }.mapIndexed { i, f -> f.copy(index = i) })
+            val slots = s.tileSlots.toMutableList()
+            while (slots.size < 4) slots.add(null)
+            if (index in slots.indices) slots[index] = null
+            val ordered = slots.mapIndexedNotNull { i, f -> f?.copy(index = i) }
+            s.copy(tileSlots = slots, frames = ordered)
+        }
+        if (_state.value.mode == CaptureMode.Panorama) {
+            viewModelScope.launch(Dispatchers.Default) {
+                val good = _state.value.tileSlots
+                    .mapIndexedNotNull { i, f -> if (f != null) i else null }
+                    .toSet()
+                val snap = coverageTracker.rebuildFromTileStates(good)
+                withContext(Dispatchers.Main) {
+                    _state.update {
+                        it.copy(
+                            coverage = snap,
+                            mosaicThumb = coverageTracker.mosaicThumbnail(),
+                        )
+                    }
+                }
+            }
         }
     }
 
@@ -215,13 +347,45 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun onPanoramaDone() {
-        if (_state.value.frames.size < 2) {
+    /** User taps Done — only when all 4 tiles are Good (unless force). */
+    fun onPanoramaDone(force: Boolean = false) {
+        val ready = _state.value.coverage.readyToFinish
+        val slots = _state.value.tileSlots
+        val filled = slots.count { it != null }
+        if (filled == 0) {
             viewModelScope.launch {
-                navChannel.send(ScanNavEvent.Snackbar("Capture at least 2 overlapping tiles"))
+                navChannel.send(ScanNavEvent.Snackbar("Capture the 4 page tiles first"))
             }
             return
         }
+        if (!force && !ready) {
+            viewModelScope.launch {
+                navChannel.send(
+                    ScanNavEvent.Snackbar("Finish all 4 tiles (fix blurry ones) before Done"),
+                )
+            }
+            return
+        }
+        if (!force && filled < 4) {
+            viewModelScope.launch {
+                navChannel.send(ScanNavEvent.Snackbar("Need all 4 tiles before stitching"))
+            }
+            return
+        }
+        val ordered = slots.mapIndexedNotNull { i, f -> f?.copy(index = i) }
+        _state.update { it.copy(frames = ordered) }
+        beginStitch()
+    }
+
+    fun confirmEarlyFinish() {
+        val ordered = _state.value.tileSlots.mapIndexedNotNull { i, f -> f?.copy(index = i) }
+        if (ordered.isEmpty()) {
+            val frames = _state.value.frames
+            if (frames.isEmpty()) return
+            beginStitch()
+            return
+        }
+        _state.update { it.copy(frames = ordered) }
         beginStitch()
     }
 

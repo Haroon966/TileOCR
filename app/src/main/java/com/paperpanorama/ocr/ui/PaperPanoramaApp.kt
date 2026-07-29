@@ -10,10 +10,13 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -60,6 +63,7 @@ fun PaperPanoramaApp(
     /** True after user taps Allow — ignore dialog dismiss-as-deny while system prompt is up. */
     var awaitingSystemPermission by remember { mutableStateOf(false) }
     var launchSystemPermission by remember { mutableStateOf(false) }
+    var showEarlyFinishConfirm by remember { mutableStateOf(false) }
 
     fun hasCameraPermission(): Boolean =
         ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
@@ -157,6 +161,9 @@ fun PaperPanoramaApp(
                         launchSystemPermission = true
                     }
                 }
+                ScanNavEvent.ConfirmEarlyFinish -> {
+                    showEarlyFinishConfirm = true
+                }
                 is ScanNavEvent.Snackbar -> {
                     snackbarHostState.showSnackbar(event.message)
                 }
@@ -183,6 +190,9 @@ fun PaperPanoramaApp(
                     mode = state.mode,
                     frames = state.frames,
                     featureWarn = state.featureWarn,
+                    coverage = state.coverage,
+                    mosaicThumb = state.mosaicThumb,
+                    isIngestingCapture = state.isIngestingCapture,
                     sessionDir = store.sessionDir(state.sessionId),
                     onModeChange = viewModel::setMode,
                     onCaptured = { file, rotation ->
@@ -190,7 +200,7 @@ fun PaperPanoramaApp(
                     },
                     onRemoveFrame = viewModel::removeFrameAt,
                     onMoveFrame = viewModel::moveFrame,
-                    onDonePanorama = viewModel::onPanoramaDone,
+                    onDonePanorama = { viewModel.onPanoramaDone(force = false) },
                     onBack = {
                         viewModel.goHome()
                         navController.popBackStack(Destinations.Home.route, false)
@@ -245,9 +255,17 @@ fun PaperPanoramaApp(
                     pageUri = state.pageUri,
                     pageWidth = state.pageWidth,
                     pageHeight = state.pageHeight,
+                    library = state.library,
+                    libraryScanId = state.libraryScanId,
+                    onSelectScan = viewModel::selectLibraryScan,
                     onCrop = viewModel::beginCrop,
                     onRotate = viewModel::rotateOcrPage,
                     onRetake = viewModel::retake,
+                    onDelete = viewModel::deleteLibraryScanFromViewer,
+                    onBack = {
+                        viewModel.goHome()
+                        navController.popBackStack(Destinations.Home.route, false)
+                    },
                     onDone = {
                         viewModel.goHome()
                         navController.navigate(Destinations.Home.route) {
@@ -274,6 +292,42 @@ fun PaperPanoramaApp(
                 if (!awaitingSystemPermission) {
                     showPermissionRationale = false
                     viewModel.onPermissionDenied()
+                }
+            },
+        )
+    }
+
+    if (showEarlyFinishConfirm) {
+        AlertDialog(
+            onDismissRequest = { showEarlyFinishConfirm = false },
+            title = { Text("Finish incomplete page?") },
+            text = {
+                val endsNote = when {
+                    !state.coverage.progressDeterminate ->
+                        " Page ends not both seen yet."
+                    !state.coverage.sawStartEnd || !state.coverage.sawFinishEnd ->
+                        " Page ends not both seen yet."
+                    else -> ""
+                }
+                Text(
+                    "Coverage is ${state.coverage.coveragePercent}%.$endsNote More shots usually improve OCR. Finish anyway?",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showEarlyFinishConfirm = false
+                        viewModel.confirmEarlyFinish()
+                    },
+                ) {
+                    Text("Finish anyway")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showEarlyFinishConfirm = false },
+                ) {
+                    Text("Keep scanning")
                 }
             },
         )
