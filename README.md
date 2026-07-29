@@ -4,6 +4,23 @@ Android app that captures paper via **guided multi-tile / panorama** scanning, s
 
 **Repo:** [github.com/Haroon966/TileOCR](https://github.com/Haroon966/TileOCR)
 
+## Problem
+
+- A single phone photo of an A4 / legal / notebook page is often too low-res, skewed, or glare-lit for reliable OCR.
+- Large or dense pages need close-up shots; stitching those tiles into one page is missing from most scanner apps.
+- Urdu (especially Nastaliq) and bilingual EN+UR pages are poorly handled by Latin-only engines.
+- Many scanners push cloud-only OCR with no solid offline path.
+
+## Solution
+
+**TileOCR** is a camera-first Android pipeline:
+
+1. Capture overlapping **tiles** of one page (or a single shot).
+2. **Stitch** them into one high-res mosaic (OpenCV document scans mode).
+3. Detect edges, warp flat, and enhance for readable text.
+4. Run **English + Urdu OCR** on-device first; optional cloud/VLM only with consent.
+5. Edit, export, and keep scans in a private local library.
+
 ## Features (current)
 
 - CameraX capture: single-shot and multi-tile modes
