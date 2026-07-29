@@ -1,23 +1,29 @@
-# PaperPanorama OCR
+# TileOCR
 
-Android app that captures paper via **guided panorama / multi-frame** scanning, stitches and flattens the page, then runs **English + Urdu OCR** (offline-first).
+Android app that captures paper via **guided multi-tile / panorama** scanning, stitches and flattens the page, then runs **English + Urdu OCR** (offline-first).
 
-This repository currently contains:
+**Repo:** [github.com/Haroon966/TileOCR](https://github.com/Haroon966/TileOCR)
 
-- Product docs: [`PRD.md`](PRD.md), [`docs/RESEARCH.md`](docs/RESEARCH.md), [`docs/FEATURE_REQUIREMENTS.md`](docs/FEATURE_REQUIREMENTS.md)
-- A **Kotlin + Jetpack Compose + CameraX** scaffold (`app/`) with Home → Camera → Review → Result navigation placeholders
+## Features (current)
+
+- CameraX capture: single-shot and multi-tile modes
+- OpenCV document stitch (`SCANS` / affine path) with progress and failure fallback
+- Edge detect, corner drag, perspective warp, enhance presets
+- Local scan library (save / open / delete)
+- Compose UI: Home → Camera → Stitch → Prepare → Result
+
+OCR model wiring (PaddleOCR ONNX) is still in progress — see the PRD phases.
 
 ## Stack
 
 | Layer | Choice |
 |-------|--------|
 | UI | Kotlin, Jetpack Compose, Material 3 |
-| Camera | CameraX (wired in Phase 1) |
+| Camera | CameraX |
 | CV / stitch | OpenCV (`Stitcher::SCANS`) |
-| On-device OCR | PaddleOCR via ONNX Runtime |
+| Paper mask | U²-Net lite (`u2netp.tflite` in assets) |
+| On-device OCR | PaddleOCR via ONNX Runtime (planned) |
 | Optional quality | Cloud / VLM for hard Nastaliq (opt-in) |
-
-See the PRD for architecture and phases.
 
 ## Requirements
 
@@ -25,14 +31,14 @@ See the PRD for architecture and phases.
 - Android SDK 35
 - Physical device recommended for camera work (API 26+)
 
-## Open in Android Studio
+## Quick start
 
-1. **File → Open** this repository root (`ocr/`).
+1. **File → Open** this repository root.
 2. Let Gradle sync (wrapper downloads on first run).
 3. Select the `app` run configuration and a device/emulator.
 4. Run.
 
-If `local.properties` is missing, Android Studio creates it. A checked local SDK path may already exist for this machine; do not commit secrets.
+`local.properties` is gitignored — Android Studio creates it with your SDK path.
 
 ## Project layout
 
@@ -42,24 +48,17 @@ docs/
   RESEARCH.md
   FEATURE_REQUIREMENTS.md
 app/
-  src/main/java/com/paperpanorama/ocr/
-    MainActivity.kt
-    ui/                 # Compose shell + screens
+  src/main/java/com/paperpanorama/ocr/   # applicationId (legacy package; display name is TileOCR)
 settings.gradle.kts
 build.gradle.kts
 ```
 
-## Current status (scaffold)
-
-- Compose navigation shell with placeholder Camera / Review / Result screens
-- Dependencies declared: CameraX, OpenCV, ONNX Runtime
-- **Not yet implemented:** live camera, stitching, OCR models, export
-
-Next implementation work is Phase 1 in the PRD (single-shot + basic multi-frame stitch + on-device EN/UR OCR).
-
 ## Docs
 
 1. [PRD.md](PRD.md) — product vision and success metrics  
-2. [docs/RESEARCH.md](docs/RESEARCH.md) — GitHub repos, papers, models  
+2. [docs/RESEARCH.md](docs/RESEARCH.md) — repos, papers, models  
 3. [docs/FEATURE_REQUIREMENTS.md](docs/FEATURE_REQUIREMENTS.md) — P0/P1/P2 features  
-# TileOCR
+
+## License
+
+MIT — see [LICENSE](LICENSE).

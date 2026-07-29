@@ -1,0 +1,9 @@
+package com.paperpanorama.ocr.ui.navigation
+
+sealed class Destinations(val route: String) {
+    data object Home : Destinations("home")
+    data object Camera : Destinations("camera")
+    data object Stitching : Destinations("stitching")
+    data object Prepare : Destinations("prepare")
+    data object OcrReady : Destinations("ocr_ready")
+}
