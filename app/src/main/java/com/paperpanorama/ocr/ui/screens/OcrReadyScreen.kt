@@ -27,6 +27,7 @@ import androidx.compose.material.icons.outlined.Crop
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.DocumentScanner
 import androidx.compose.material.icons.outlined.Rotate90DegreesCcw
+import androidx.compose.material.icons.outlined.TextFields
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -80,6 +81,7 @@ fun OcrReadyScreen(
     onAutoEnhance: () -> Unit,
     onCrop: () -> Unit,
     onRotate: () -> Unit,
+    onOcr: () -> Unit,
     onRetake: () -> Unit,
     onDelete: (String) -> Unit,
     onBack: () -> Unit,
@@ -232,6 +234,12 @@ fun OcrReadyScreen(
                         label = "Rotate",
                         enabled = pageReady && toolsEnabled,
                         onClick = onRotate,
+                    )
+                    EditTool(
+                        icon = Icons.Outlined.TextFields,
+                        label = "OCR",
+                        enabled = pageReady && toolsEnabled,
+                        onClick = onOcr,
                     )
                     EditTool(
                         icon = Icons.Outlined.DocumentScanner,

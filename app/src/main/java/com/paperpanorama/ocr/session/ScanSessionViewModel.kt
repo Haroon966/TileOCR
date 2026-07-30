@@ -6,6 +6,7 @@ import android.graphics.Bitmap
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.paperpanorama.ocr.BuildConfig
 import com.paperpanorama.ocr.audit.StitchAuditStore
 import com.paperpanorama.ocr.camera.CaptureStore
 import com.paperpanorama.ocr.capture.CoverageTracker
@@ -21,6 +22,9 @@ import com.paperpanorama.ocr.domain.EnhancePreset
 import com.paperpanorama.ocr.domain.SavedScan
 import com.paperpanorama.ocr.domain.StitchResult
 import com.paperpanorama.ocr.library.ScanLibrary
+import com.paperpanorama.ocr.ocr.CleanPageRenderer
+import com.paperpanorama.ocr.ocr.MistralOcrClient
+import com.paperpanorama.ocr.ocr.OcrBlock
 import com.paperpanorama.ocr.orient.OpenCvFrameNormalizer
 import com.paperpanorama.ocr.stitch.OpenCvDocumentStitcher
 import com.paperpanorama.ocr.util.BitmapDecode
@@ -35,6 +39,7 @@ import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import kotlin.math.roundToInt
 
 data class ScanUiState(
@@ -79,6 +84,11 @@ data class ScanUiState(
     val isBakingPuzzle: Boolean = false,
     /** Library persist in flight — gate page tools until done. */
     val isSavingPage: Boolean = false,
+    /** Mistral OCR → clean white page. */
+    val isRunningOcr: Boolean = false,
+    val ocrMarkdown: String = "",
+    val ocrCleanUri: Uri? = null,
+    val ocrError: String? = null,
 )
 
 
@@ -810,6 +820,132 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
             } else {
                 _state.update { it.copy(isSavingPage = false) }
             }
+        }
+    }
+
+    /**
+     * Call Mistral OCR on current page → white Inter reconstruction → Result screen.
+     */
+    fun runMistralOcr() {
+        if (_state.value.isRunningOcr) return
+        val page = _state.value.pageUri ?: run {
+            viewModelScope.launch {
+                navChannel.send(ScanNavEvent.Snackbar("No page to OCR"))
+            }
+            return
+        }
+        val key = BuildConfig.MISTRAL_API_KEY
+        if (key.isBlank()) {
+            viewModelScope.launch {
+                navChannel.send(ScanNavEvent.Snackbar("Set mistral_api_key in .env"))
+            }
+            return
+        }
+        viewModelScope.launch {
+            _state.update {
+                it.copy(
+                    isRunningOcr = true,
+                    ocrError = null,
+                    ocrCleanUri = null,
+                    ocrMarkdown = "",
+                )
+            }
+            navChannel.send(ScanNavEvent.ToOcrResult)
+            val app = getApplication<Application>()
+            val path = page.path
+            if (path.isNullOrBlank()) {
+                _state.update {
+                    it.copy(isRunningOcr = false, ocrError = "Page path missing")
+                }
+                return@launch
+            }
+            val client = MistralOcrClient(key)
+            val apiResult = client.processJpegFile(File(path))
+            when (apiResult) {
+                is MistralOcrClient.Result.Err -> {
+                    _state.update {
+                        it.copy(isRunningOcr = false, ocrError = apiResult.message)
+                    }
+                }
+                is MistralOcrClient.Result.Ok -> {
+                    try {
+                        val pageW = _state.value.pageWidth.coerceAtLeast(1)
+                        val pageH = _state.value.pageHeight.coerceAtLeast(1)
+                        var blocks = apiResult.page.blocks
+                        if (blocks.isEmpty() && apiResult.page.markdown.isNotBlank()) {
+                            blocks = listOf(
+                                OcrBlock(
+                                    type = "text",
+                                    text = apiResult.page.markdown,
+                                    left = 0.06f,
+                                    top = 0.06f,
+                                    right = 0.94f,
+                                    bottom = 0.94f,
+                                ),
+                            )
+                        }
+                        val clean = withContext(Dispatchers.Default) {
+                            CleanPageRenderer(app).render(
+                                pageW = pageW,
+                                pageH = pageH,
+                                blocks = blocks,
+                                apiPageW = apiResult.page.pageWidth,
+                                apiPageH = apiResult.page.pageHeight,
+                            )
+                        }
+                        val outDir = File(app.cacheDir, "ocr_clean").also { it.mkdirs() }
+                        val outFile = File(outDir, "clean_${System.currentTimeMillis()}.jpg")
+                        withContext(Dispatchers.IO) {
+                            outFile.outputStream().use { os ->
+                                clean.compress(Bitmap.CompressFormat.JPEG, 92, os)
+                            }
+                        }
+                        clean.recycle()
+                        _state.update {
+                            it.copy(
+                                isRunningOcr = false,
+                                ocrMarkdown = apiResult.page.markdown,
+                                ocrCleanUri = Uri.fromFile(outFile),
+                                ocrError = null,
+                            )
+                        }
+                    } catch (t: Throwable) {
+                        _state.update {
+                            it.copy(
+                                isRunningOcr = false,
+                                ocrError = t.message ?: "Could not build clean page",
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fun copyOcrMarkdown(context: Context) {
+        val text = _state.value.ocrMarkdown
+        if (text.isBlank()) return
+        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+        cm.setPrimaryClip(android.content.ClipData.newPlainText("OCR", text))
+        viewModelScope.launch {
+            navChannel.send(ScanNavEvent.Snackbar("Copied"))
+        }
+    }
+
+    fun saveOcrCleanImage() {
+        val uri = _state.value.ocrCleanUri ?: return
+        val app = getApplication<Application>()
+        viewModelScope.launch {
+            val ok = withContext(Dispatchers.IO) {
+                MediaSaver.saveToGallery(
+                    app,
+                    uri,
+                    "ocr_clean_${System.currentTimeMillis()}.jpg",
+                )
+            }
+            navChannel.send(
+                ScanNavEvent.Snackbar(if (ok) "Saved to gallery" else "Could not save"),
+            )
         }
     }
 

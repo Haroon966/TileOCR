@@ -10,6 +10,7 @@ sealed class ScanNavEvent {
     data object ToStitchReview : ScanNavEvent()
     data object ToPrepare : ScanNavEvent()
     data object ToOcrReady : ScanNavEvent()
+    data object ToOcrResult : ScanNavEvent()
     data object RequestPermission : ScanNavEvent()
     /** User tapped Finish before coverage gates; show confirm dialog. */
     data object ConfirmEarlyFinish : ScanNavEvent()

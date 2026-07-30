@@ -7,4 +7,5 @@ sealed class Destinations(val route: String) {
     data object StitchReview : Destinations("stitch_review")
     data object Prepare : Destinations("prepare")
     data object OcrReady : Destinations("ocr_ready")
+    data object OcrResult : Destinations("ocr_result")
 }

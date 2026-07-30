@@ -44,6 +44,7 @@ import com.paperpanorama.ocr.ui.screens.CameraPermissionDialog
 import com.paperpanorama.ocr.ui.screens.CameraScreen
 import com.paperpanorama.ocr.ui.screens.HomeScreen
 import com.paperpanorama.ocr.ui.screens.OcrReadyScreen
+import com.paperpanorama.ocr.ui.screens.OcrResultScreen
 import com.paperpanorama.ocr.ui.screens.PrepareScreen
 import com.paperpanorama.ocr.ui.screens.StitchFailureSheet
 import com.paperpanorama.ocr.ui.screens.StitchReviewScreen
@@ -213,6 +214,11 @@ fun PaperPanoramaApp(
                         launchSingleTop = true
                     }
                 }
+                ScanNavEvent.ToOcrResult -> {
+                    navController.navigate(Destinations.OcrResult.route) {
+                        launchSingleTop = true
+                    }
+                }
                 ScanNavEvent.RequestPermission -> {
                     if (shouldShowRationale()) {
                         showPermissionRationale = true
@@ -341,11 +347,12 @@ fun PaperPanoramaApp(
                     pageHeight = state.pageHeight,
                     library = state.library,
                     libraryScanId = state.libraryScanId,
-                    toolsEnabled = !state.isSavingPage && !state.isPreparingPage,
+                    toolsEnabled = !state.isSavingPage && !state.isPreparingPage && !state.isRunningOcr,
                     onSelectScan = viewModel::selectLibraryScan,
                     onAutoEnhance = viewModel::reEnhancePage,
                     onCrop = viewModel::beginCrop,
                     onRotate = viewModel::rotateOcrPage,
+                    onOcr = viewModel::runMistralOcr,
                     onRetake = viewModel::retake,
                     onDelete = viewModel::deleteLibraryScanFromViewer,
                     onBack = {
@@ -357,6 +364,19 @@ fun PaperPanoramaApp(
                         navController.navigate(Destinations.Home.route) {
                             popUpTo(Destinations.Home.route) { inclusive = true }
                         }
+                    },
+                )
+            }
+            composable(Destinations.OcrResult.route) {
+                OcrResultScreen(
+                    cleanUri = state.ocrCleanUri,
+                    markdown = state.ocrMarkdown,
+                    isRunning = state.isRunningOcr,
+                    error = state.ocrError,
+                    onCopy = { viewModel.copyOcrMarkdown(context) },
+                    onSave = viewModel::saveOcrCleanImage,
+                    onBack = {
+                        navController.popBackStack()
                     },
                 )
             }

@@ -4,6 +4,21 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+fun readMistralApiKeyFromEnv(): String {
+    val envFile = rootProject.file(".env")
+    if (!envFile.isFile) return ""
+    return envFile.readLines()
+        .map { it.trim() }
+        .filter { it.isNotEmpty() && !it.startsWith("#") }
+        .firstOrNull { it.startsWith("mistral_api_key=") }
+        ?.substringAfter("=")
+        ?.trim()
+        ?.trim('"')
+        .orEmpty()
+}
+
+val mistralApiKey: String = readMistralApiKeyFromEnv()
+
 android {
     namespace = "com.paperpanorama.ocr"
     compileSdk = 35
@@ -15,6 +30,8 @@ android {
         versionCode = 3
         versionName = "0.4.0-ocr"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        buildConfigField("String", "MISTRAL_API_KEY", "\"${mistralApiKey.replace("\"", "\\\"")}\"")
 
         ndk {
             // Phone is arm64; skip unused ABIs.
@@ -43,6 +60,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     packaging {
@@ -72,6 +90,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("androidx.exifinterface:exifinterface:1.3.7")
     implementation("io.coil-kt:coil-compose:2.7.0")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
