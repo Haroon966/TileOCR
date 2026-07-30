@@ -1,12 +1,16 @@
 package com.paperpanorama.ocr.session
 
 import android.app.Application
+import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.paperpanorama.ocr.audit.StitchAuditStore
 import com.paperpanorama.ocr.camera.CaptureStore
 import com.paperpanorama.ocr.capture.CoverageTracker
+import com.paperpanorama.ocr.capture.PageSpaceTracker
+import com.paperpanorama.ocr.camera.MlKitDocumentScan
 import com.paperpanorama.ocr.doc.OpenCvDocumentProcessor
 import com.paperpanorama.ocr.doc.QuadMath
 import com.paperpanorama.ocr.domain.CaptureFrame
@@ -31,6 +35,7 @@ import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.roundToInt
 
 data class ScanUiState(
     val sessionId: String = "",
@@ -45,7 +50,7 @@ data class ScanUiState(
     val showFailureSheet: Boolean = false,
     val featureWarn: String? = null,
     val isStitching: Boolean = false,
-    /** Prepare-for-OCR */
+    /** Prepare page (crop / enhance) */
     val docQuad: DocQuad? = null,
     val enhancePreset: EnhancePreset = EnhancePreset.Auto,
     val isDetectingQuad: Boolean = false,
@@ -63,19 +68,33 @@ data class ScanUiState(
     val isIngestingCapture: Boolean = false,
     /** Coarse live mosaic of locked page cells (camera HUD). */
     val mosaicThumb: Bitmap? = null,
-    /** Fixed 2×2 tile slots (TL, TR, BL, BR). Null = not captured yet. */
-    val tileSlots: List<CaptureFrame?> = listOf(null, null, null, null),
+    /** null=idle, true=last still accepted, false=rejected (recapture Soft without forced pan). */
+    val lastIngestAccepted: Boolean? = null,
+    /** Durable copies of input tiles for stitch audit UI + adb pull. */
+    val auditInputUris: List<Uri> = emptyList(),
+    val auditDirHint: String? = null,
+    /** Pending auto-prepare after user reviews stitch visually. */
+    val pendingPrepareFullFrame: Boolean = false,
+    /** Puzzle bake in progress. */
+    val isBakingPuzzle: Boolean = false,
+    /** Library persist in flight — gate page tools until done. */
+    val isSavingPage: Boolean = false,
 )
+
 
 class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
     private val store = CaptureStore(app)
     private val library = ScanLibrary(app)
+    private val auditStore = StitchAuditStore(app)
     private val coverageTracker = CoverageTracker(app)
     private val normalizer = OpenCvFrameNormalizer(app)
     private val stitcher = OpenCvDocumentStitcher(app, normalizer)
     private val docProcessor = OpenCvDocumentProcessor(app)
-
-    private val _state = MutableStateFlow(ScanUiState(sessionId = store.newSessionId()))
+    private val _state = MutableStateFlow(
+        ScanUiState(
+            sessionId = store.newSessionId(),
+        ),
+    )
     val state: StateFlow<ScanUiState> = _state.asStateFlow()
 
     private val navChannel = Channel<ScanNavEvent>(Channel.BUFFERED)
@@ -87,6 +106,10 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         refreshLibrary()
+    }
+
+    override fun onCleared() {
+        super.onCleared()
     }
 
     fun onNewScanClicked(hasCameraPermission: Boolean) {
@@ -109,6 +132,9 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Shared with LivePageAnalyzer so live seed lock = ingest registration. */
+    fun pageSpaceTracker(): PageSpaceTracker = coverageTracker.spaceTracker
+
     fun setMode(mode: CaptureMode) {
         _state.update { it.copy(mode = mode) }
         if (mode == CaptureMode.Single) {
@@ -117,7 +143,6 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
                 it.copy(
                     coverage = CoverageSnapshot.Idle,
                     mosaicThumb = null,
-                    tileSlots = listOf(null, null, null, null),
                 )
             }
         } else if (_state.value.frames.isEmpty()) {
@@ -126,7 +151,6 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
                 it.copy(
                     coverage = CoverageSnapshot.Idle,
                     mosaicThumb = null,
-                    tileSlots = listOf(null, null, null, null),
                 )
             }
         }
@@ -137,6 +161,10 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
         prepareJob?.cancel()
         cancelStitch = false
         coverageTracker.reset()
+        val oldId = _state.value.sessionId
+        if (oldId.isNotBlank()) {
+            store.clearSession(oldId)
+        }
         val id = store.newSessionId()
         _state.value = ScanUiState(
             sessionId = id,
@@ -191,6 +219,7 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
      * page image (library re-crop). Detects edges then opens Prepare.
      */
     fun beginCrop() {
+        if (_state.value.isSavingPage) return
         val source = _state.value.mosaicUri ?: _state.value.pageUri ?: return
         viewModelScope.launch {
             _state.update {
@@ -210,9 +239,57 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Re-run Auto enhance on current mosaic (or page) without opening crop UI. */
+    fun reEnhancePage() {
+        if (_state.value.isSavingPage || _state.value.isPreparingPage) return
+        val mosaic = _state.value.mosaicUri
+        val page = _state.value.pageUri ?: return
+        prepareJob?.cancel()
+        prepareJob = viewModelScope.launch {
+            _state.update {
+                it.copy(isPreparingPage = true, prepareError = null, enhancePreset = EnhancePreset.Auto)
+            }
+            try {
+                val source = mosaic ?: page
+                val path = source.path
+                val (w, h) = path?.let { BitmapDecode.bounds(it) } ?: (1000 to 1000)
+                val quad = when {
+                    mosaic != null && _state.value.docQuad != null -> _state.value.docQuad!!
+                    mosaic != null -> runCatching { docProcessor.detectQuad(mosaic) }
+                        .getOrElse { QuadMath.fullFrame(w, h) }
+                    else -> QuadMath.fullFrame(w, h)
+                }
+                val result = docProcessor.prepareForOcr(source, quad, EnhancePreset.Auto)
+                _state.update {
+                    it.copy(
+                        isPreparingPage = false,
+                        pageUri = result.pageUri,
+                        pageWidth = result.width,
+                        pageHeight = result.height,
+                        docQuad = quad,
+                        isSavingPage = true,
+                    )
+                }
+                persistPage(mosaic, result.pageUri)
+                navChannel.send(ScanNavEvent.Snackbar("Enhanced"))
+            } catch (t: Throwable) {
+                if (t is kotlinx.coroutines.CancellationException) throw t
+                _state.update {
+                    it.copy(
+                        isPreparingPage = false,
+                        isSavingPage = false,
+                        prepareError = t.message ?: "Enhance failed",
+                    )
+                }
+                navChannel.send(ScanNavEvent.Snackbar(t.message ?: "Enhance failed"))
+            }
+        }
+    }
+
     fun deleteScan(id: String) {
         viewModelScope.launch(Dispatchers.IO) {
             library.delete(id)
+            MediaSaver.deleteByDisplayName(getApplication(), MediaSaver.pageDisplayName(id))
             val scans = library.list()
             withContext(Dispatchers.Main) {
                 _state.update { s ->
@@ -232,7 +309,10 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val before = _state.value.library
             val idx = before.indexOfFirst { it.id == id }
-            withContext(Dispatchers.IO) { library.delete(id) }
+            withContext(Dispatchers.IO) {
+                library.delete(id)
+                MediaSaver.deleteByDisplayName(getApplication(), MediaSaver.pageDisplayName(id))
+            }
             val scans = withContext(Dispatchers.IO) { library.list() }
             if (scans.isEmpty()) {
                 _state.update {
@@ -258,7 +338,49 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun addCapturedFile(file: java.io.File, displayRotation: Int) {
+    /**
+     * Google Document Scanner finished — import pages, then run app pipeline:
+     * normalize (rotation) → per-page crop polish → geometric stitch / component stack.
+     */
+    fun onMlKitDocumentPages(uris: List<Uri>) {
+        if (uris.isEmpty()) {
+            viewModelScope.launch {
+                navChannel.send(ScanNavEvent.Snackbar("No pages scanned"))
+            }
+            return
+        }
+        viewModelScope.launch {
+            _state.update { it.copy(isIngestingCapture = true, featureWarn = null) }
+            val sessionId = _state.value.sessionId
+            val frames = try {
+                withContext(Dispatchers.IO) {
+                    store.importPageUris(sessionId, uris.take(MlKitDocumentScan.PAGE_LIMIT))
+                }
+            } catch (t: Throwable) {
+                _state.update { it.copy(isIngestingCapture = false) }
+                navChannel.send(ScanNavEvent.Snackbar(t.message ?: "Could not import scanned pages"))
+                return@launch
+            }
+            val mode = if (frames.size == 1) CaptureMode.Single else CaptureMode.Panorama
+            _state.update {
+                it.copy(
+                    mode = mode,
+                    frames = frames,
+                    coverage = CoverageSnapshot.Idle,
+                    mosaicThumb = null,
+                    isIngestingCapture = false,
+                )
+            }
+            // Full smart stitch (crop + align + multi-component stack), not blind vertical dump.
+            beginStitch(combineDocumentPages = false)
+        }
+    }
+
+    fun onMlKitDocumentCancelled() {
+        // Stay on home / current screen — no-op beyond optional coach.
+    }
+
+    fun addCapturedFile(file: java.io.File, displayRotation: Int, forTileIndex: Int? = null) {
         if (_state.value.mode == CaptureMode.Single) {
             val index = _state.value.frames.size
             val frame = store.frameFromFile(index, file, displayRotation)
@@ -275,9 +397,8 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
 
         viewModelScope.launch {
             _state.update { it.copy(isIngestingCapture = true) }
-            val targetTile = _state.value.coverage.activeTileIndex
             val result = withContext(Dispatchers.Default) {
-                coverageTracker.ingest(Uri.fromFile(file), forceTileIndex = targetTile)
+                coverageTracker.ingest(Uri.fromFile(file))
             }
             if (!result.accepted) {
                 file.delete()
@@ -287,44 +408,49 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
                         coverage = result.snapshot,
                         featureWarn = result.snapshot.nextHint,
                         mosaicThumb = coverageTracker.mosaicThumbnail(),
+                        lastIngestAccepted = false,
                     )
                 }
                 return@launch
             }
             val frame = withContext(Dispatchers.IO) {
-                store.frameFromFile(result.tileIndex, file, displayRotation)
+                store.frameFromFile(_state.value.frames.size, file, displayRotation)
             }
             _state.update { s ->
-                val slots = s.tileSlots.toMutableList()
-                while (slots.size < 4) slots.add(null)
-                slots[result.tileIndex] = frame
-                val ordered = slots.mapIndexedNotNull { i, f -> f?.copy(index = i) }
+                val next = s.frames + frame.copy(index = s.frames.size)
                 s.copy(
-                    tileSlots = slots,
-                    frames = ordered,
+                    frames = next,
                     featureWarn = null,
                     coverage = result.snapshot,
                     isIngestingCapture = false,
                     mosaicThumb = coverageTracker.mosaicThumbnail(),
+                    lastIngestAccepted = true,
                 )
             }
         }
     }
 
-    fun removeFrameAt(index: Int) {
+    fun consumeIngestResult() {
+        _state.update { it.copy(lastIngestAccepted = null) }
+    }
+
+    fun onLivePageMapped() {
+        val pr = coverageTracker.spaceTracker.pageRectSeed()
+        coverageTracker.markPageMappedFromLive(pr.minX, pr.minY, pr.maxX, pr.maxY)
+        _state.update { it.copy(coverage = coverageTracker.snapshot()) }
+    }
+
+    fun removeFrameAt(listIndex: Int) {
         _state.update { s ->
-            val slots = s.tileSlots.toMutableList()
-            while (slots.size < 4) slots.add(null)
-            if (index in slots.indices) slots[index] = null
-            val ordered = slots.mapIndexedNotNull { i, f -> f?.copy(index = i) }
-            s.copy(tileSlots = slots, frames = ordered)
+            val frames = s.frames.toMutableList()
+            if (listIndex !in frames.indices) return@update s
+            frames.removeAt(listIndex)
+            s.copy(frames = frames.mapIndexed { i, f -> f.copy(index = i) })
         }
         if (_state.value.mode == CaptureMode.Panorama) {
             viewModelScope.launch(Dispatchers.Default) {
-                val good = _state.value.tileSlots
-                    .mapIndexedNotNull { i, f -> if (f != null) i else null }
-                    .toSet()
-                val snap = coverageTracker.rebuildFromTileStates(good)
+                val uris = _state.value.frames.map { it.uri }
+                val snap = coverageTracker.rebuild(uris)
                 withContext(Dispatchers.Main) {
                     _state.update {
                         it.copy(
@@ -339,57 +465,39 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
 
     fun moveFrame(from: Int, to: Int) {
         _state.update { s ->
-            if (from !in s.frames.indices || to !in s.frames.indices) return@update s
-            val list = s.frames.toMutableList()
-            val item = list.removeAt(from)
-            list.add(to, item)
-            s.copy(frames = list.mapIndexed { i, f -> f.copy(index = i) })
+            if (from !in s.frames.indices || to !in s.frames.indices || from == to) return@update s
+            val frames = s.frames.toMutableList()
+            val item = frames.removeAt(from)
+            frames.add(to, item)
+            s.copy(frames = frames.mapIndexed { i, f -> f.copy(index = i) })
         }
     }
 
-    /** User taps Done — only when all 4 tiles are Good (unless force). */
+    /** User taps Done — every cell Locked. */
     fun onPanoramaDone(force: Boolean = false) {
+        val frames = _state.value.frames
         val ready = _state.value.coverage.readyToFinish
-        val slots = _state.value.tileSlots
-        val filled = slots.count { it != null }
-        if (filled == 0) {
+        if (frames.isEmpty()) {
             viewModelScope.launch {
-                navChannel.send(ScanNavEvent.Snackbar("Capture the 4 page tiles first"))
+                navChannel.send(ScanNavEvent.Snackbar("Capture sharp tiles until the grid is locked"))
             }
             return
         }
         if (!force && !ready) {
             viewModelScope.launch {
-                navChannel.send(
-                    ScanNavEvent.Snackbar("Finish all 4 tiles (fix blurry ones) before Done"),
-                )
+                navChannel.send(ScanNavEvent.ConfirmEarlyFinish)
             }
             return
         }
-        if (!force && filled < 4) {
-            viewModelScope.launch {
-                navChannel.send(ScanNavEvent.Snackbar("Need all 4 tiles before stitching"))
-            }
-            return
-        }
-        val ordered = slots.mapIndexedNotNull { i, f -> f?.copy(index = i) }
-        _state.update { it.copy(frames = ordered) }
         beginStitch()
     }
 
     fun confirmEarlyFinish() {
-        val ordered = _state.value.tileSlots.mapIndexedNotNull { i, f -> f?.copy(index = i) }
-        if (ordered.isEmpty()) {
-            val frames = _state.value.frames
-            if (frames.isEmpty()) return
-            beginStitch()
-            return
-        }
-        _state.update { it.copy(frames = ordered) }
+        if (_state.value.frames.isEmpty()) return
         beginStitch()
     }
 
-    fun beginStitch() {
+    fun beginStitch(combineDocumentPages: Boolean = false) {
         if (_state.value.frames.isEmpty()) return
         cancelStitch = false
         stitchJob?.cancel()
@@ -411,27 +519,54 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
             _state.update { it.copy(frames = normalized) }
 
             val result = try {
-                stitcher.stitch(
-                    frames = normalized,
-                    onProgress = { f, msg ->
-                        _state.update { it.copy(stitchProgress = f, stitchMessage = msg) }
-                    },
-                    isCancelled = { cancelStitch },
-                )
+                if (combineDocumentPages) {
+                    stitcher.combineDocumentPages(
+                        frames = normalized,
+                        onProgress = { f, msg ->
+                            _state.update { it.copy(stitchProgress = f, stitchMessage = msg) }
+                        },
+                        isCancelled = { cancelStitch },
+                    )
+                } else {
+                    stitcher.stitch(
+                        frames = normalized,
+                        onProgress = { f, msg ->
+                            _state.update { it.copy(stitchProgress = f, stitchMessage = msg) }
+                        },
+                        isCancelled = { cancelStitch },
+                    )
+                }
             } catch (t: Throwable) {
                 if (t is kotlinx.coroutines.CancellationException) throw t
                 StitchResult.Failed(t.message ?: "Stitch crashed", normalized.firstOrNull()?.uri)
             }
             when (result) {
                 is StitchResult.Ok -> {
+                    val sessionId = _state.value.sessionId
+                    val auditInputs = withContext(Dispatchers.IO) {
+                        auditStore.saveInputs(sessionId, normalized)
+                    }
+                    val auditMosaic = withContext(Dispatchers.IO) {
+                        auditStore.saveMosaic(sessionId, result.mosaicUri)
+                    }
+                    val bundle = auditStore.latestBundle(sessionId)
                     _state.update {
                         it.copy(
-                            mosaicUri = result.mosaicUri,
+                            mosaicUri = auditMosaic ?: result.mosaicUri,
                             usedFallback = result.usedFallback,
                             stitchProgress = 1f,
+                            isStitching = false,
+                            auditInputUris = auditInputs.ifEmpty {
+                                normalized.map { f -> f.uri }
+                            },
+                            auditDirHint = bundle?.dir?.absolutePath
+                                ?: "Android/data/com.paperpanorama.ocr/files/audit/$sessionId",
+                            // Full-frame prepare when we stacked pages (no panorama).
+                            pendingPrepareFullFrame = result.usedFallback,
                         )
                     }
-                    autoPrepare(result.mosaicUri)
+                    // Visual review before prepare — inputs + result side by side.
+                    navChannel.send(ScanNavEvent.ToStitchReview)
                 }
                 is StitchResult.Failed -> {
                     if (result.reason == "Cancelled") {
@@ -450,6 +585,21 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
         }
+    }
+
+    /** User finished looking at inputs vs mosaic — prepare page. */
+    fun onStitchReviewContinue() {
+        val mosaic = _state.value.mosaicUri ?: return
+        val fullFrame = _state.value.pendingPrepareFullFrame
+        viewModelScope.launch {
+            _state.update { it.copy(isStitching = true, stitchMessage = "Preparing page…") }
+            navChannel.send(ScanNavEvent.ToStitching)
+            autoPrepare(mosaic, preferFullFrame = fullFrame)
+        }
+    }
+
+    fun onStitchReviewBack() {
+        viewModelScope.launch { navChannel.send(ScanNavEvent.ToHome) }
     }
 
     fun cancelStitch() {
@@ -479,40 +629,57 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
     /**
      * Hands-off path: detect the paper, crop + warp + enhance, land on the final page.
      * Falls back to the manual Prepare screen only if the warp itself fails.
+     * [preferFullFrame] for ML Kit stacked pages — edge detect finds one page only.
      */
-    private suspend fun autoPrepare(mosaicUri: Uri) {
+    private suspend fun autoPrepare(mosaicUri: Uri, preferFullFrame: Boolean = false) {
         _state.update { it.copy(stitchMessage = "Cropping page…", isDetectingQuad = true) }
-        val quad = runCatching { docProcessor.detectQuad(mosaicUri) }.getOrElse {
-            val (w, h) = mosaicUri.path?.let { p -> BitmapDecode.bounds(p) } ?: (1000 to 1000)
+        val path = mosaicUri.path
+        val bounds = path?.let { BitmapDecode.bounds(it) }
+        val tallStack = bounds != null && bounds.second > bounds.first * 2
+        val quad = if (preferFullFrame || tallStack) {
+            val (w, h) = bounds ?: (1000 to 1000)
             QuadMath.fullFrame(w, h)
+        } else {
+            runCatching { docProcessor.detectQuad(mosaicUri) }.getOrElse {
+                val (w, h) = bounds ?: (1000 to 1000)
+                QuadMath.fullFrame(w, h)
+            }
         }
         _state.update { it.copy(docQuad = quad, isDetectingQuad = false) }
         try {
             val result = docProcessor.prepareForOcr(mosaicUri, quad, _state.value.enhancePreset)
+            withContext(Dispatchers.IO) {
+                auditStore.savePage(_state.value.sessionId, result.pageUri)
+            }
             _state.update {
                 it.copy(
                     isStitching = false,
                     pageUri = result.pageUri,
                     pageWidth = result.width,
                     pageHeight = result.height,
+                    pendingPrepareFullFrame = false,
+                    isSavingPage = true,
                 )
             }
+            val saved = persistPage(mosaicUri, result.pageUri)
             navChannel.send(ScanNavEvent.ToOcrReady)
-            saveResultsToGallery(mosaicUri, result.pageUri)
+            if (saved != null) {
+                navChannel.send(ScanNavEvent.Snackbar("Saved to library"))
+            }
         } catch (t: Throwable) {
             if (t is kotlinx.coroutines.CancellationException) throw t
-            _state.update { it.copy(isStitching = false) }
+            _state.update { it.copy(isStitching = false, isSavingPage = false) }
             navChannel.send(ScanNavEvent.ToPrepare)
         }
     }
 
-    /** Persist to gallery + durable local library so Home can list results. */
-    private fun saveResultsToGallery(mosaicUri: Uri?, pageUri: Uri) {
-        viewModelScope.launch(Dispatchers.IO) {
+    /**
+     * Durable library first, then one gallery file named by scan id (no mosaic dual-write).
+     * Updates state so [pageUri] points at filesDir, not cache.
+     */
+    private suspend fun persistPage(mosaicUri: Uri?, pageUri: Uri): SavedScan? {
+        return withContext(Dispatchers.IO) {
             val app = getApplication<Application>()
-            val stamp = System.currentTimeMillis()
-            val pageOk = MediaSaver.saveToGallery(app, pageUri, "page_$stamp.jpg")
-            mosaicUri?.let { MediaSaver.saveToGallery(app, it, "mosaic_$stamp.jpg") }
             val w = _state.value.pageWidth
             val h = _state.value.pageHeight
             val existingId = _state.value.libraryScanId
@@ -521,19 +688,23 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
             } else {
                 library.save(pageUri, mosaicUri, w, h)
             }
+            saved?.let {
+                MediaSaver.saveToGallery(app, it.pageUri, MediaSaver.pageDisplayName(it.id))
+            }
             val scans = library.list()
             withContext(Dispatchers.Main) {
                 _state.update {
                     it.copy(
                         library = scans,
                         libraryScanId = saved?.id ?: it.libraryScanId,
+                        pageUri = saved?.pageUri ?: pageUri,
+                        pageWidth = saved?.width ?: w,
+                        pageHeight = saved?.height ?: h,
+                        isSavingPage = false,
                     )
                 }
             }
-            if (pageOk || saved != null) {
-                val msg = if (existingId != null) "Crop saved" else "Saved to library"
-                navChannel.send(ScanNavEvent.Snackbar(msg))
-            }
+            saved
         }
     }
 
@@ -601,15 +772,20 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
                         pageUri = result.pageUri,
                         pageWidth = result.width,
                         pageHeight = result.height,
+                        isSavingPage = true,
                     )
                 }
+                val saved = persistPage(mosaic, result.pageUri)
                 navChannel.send(ScanNavEvent.ToOcrReady)
-                saveResultsToGallery(mosaic, result.pageUri)
+                if (saved != null) {
+                    navChannel.send(ScanNavEvent.Snackbar("Crop saved"))
+                }
             } catch (t: Throwable) {
                 if (t is kotlinx.coroutines.CancellationException) throw t
                 _state.update {
                     it.copy(
                         isPreparingPage = false,
+                        isSavingPage = false,
                         prepareError = t.message ?: "Could not prepare page",
                     )
                 }
@@ -619,30 +795,20 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Handwriting orientation is ambiguous to auto-detect; one tap fixes it. */
     fun rotateOcrPage() {
+        if (_state.value.isSavingPage) return
         val page = _state.value.pageUri ?: return
         viewModelScope.launch {
+            _state.update { it.copy(isSavingPage = true) }
             val rotated = docProcessor.rotateMosaic90(page)
             if (rotated != page) {
                 val newW = _state.value.pageHeight
                 val newH = _state.value.pageWidth
-                val libId = _state.value.libraryScanId
                 _state.update {
                     it.copy(pageUri = rotated, pageWidth = newW, pageHeight = newH)
                 }
-                launch(Dispatchers.IO) {
-                    MediaSaver.saveToGallery(
-                        getApplication(),
-                        rotated,
-                        "page_${System.currentTimeMillis()}_rot.jpg",
-                    )
-                    if (libId != null) {
-                        library.updatePage(libId, rotated, newW, newH)
-                        val scans = library.list()
-                        withContext(Dispatchers.Main) {
-                            _state.update { it.copy(library = scans) }
-                        }
-                    }
-                }
+                persistPage(_state.value.mosaicUri, rotated)
+            } else {
+                _state.update { it.copy(isSavingPage = false) }
             }
         }
     }

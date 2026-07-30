@@ -32,4 +32,21 @@ object OrientationMath {
         val candidates = listOf(0, 90, 180, 270)
         return candidates.minBy { kotlin.math.abs(it - norm).let { d -> minOf(d, 360 - d) } }
     }
+
+    /**
+     * CameraX [targetRotation] is usually [android.view.Surface] ROTATION_* (0..3).
+     * Some call sites may already pass degrees. Normalize to 0/90/180/270.
+     */
+    fun displayRotationToDegrees(rotation: Int): Int = when (rotation) {
+        0, 1, 2, 3 -> rotation * 90
+        else -> {
+            val n = ((rotation % 360) + 360) % 360
+            when (n) {
+                in 45 until 135 -> 90
+                in 135 until 225 -> 180
+                in 225 until 315 -> 270
+                else -> 0
+            }
+        }
+    }
 }

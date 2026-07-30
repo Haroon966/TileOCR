@@ -65,9 +65,9 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.paperpanorama.ocr.domain.DocQuad
 import com.paperpanorama.ocr.domain.EnhancePreset
-import com.paperpanorama.ocr.ui.theme.DeepRichRed
-import com.paperpanorama.ocr.ui.theme.SoftYellow
 import com.paperpanorama.ocr.util.BitmapDecode
+import com.paperpanorama.ocr.ui.theme.Ink
+import com.paperpanorama.ocr.ui.theme.Lime400
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlin.math.min
@@ -124,23 +124,23 @@ fun PrepareScreen(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             IconButton(onClick = onBack, modifier = Modifier.semantics { contentDescription = "Back" }) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null, tint = DeepRichRed)
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null, tint = Ink)
             }
-            Text("Prepare page", style = MaterialTheme.typography.titleLarge, color = DeepRichRed)
+            Text("Prepare page", style = MaterialTheme.typography.titleLarge, color = Ink)
             Row {
                 IconButton(
                     onClick = onRotate90,
                     modifier = Modifier.semantics { contentDescription = "Rotate 90 degrees" },
                 ) {
-                    Icon(Icons.AutoMirrored.Filled.RotateRight, contentDescription = null, tint = DeepRichRed)
+                    Icon(Icons.AutoMirrored.Filled.RotateRight, contentDescription = null, tint = Ink)
                 }
                 IconButton(
                     onClick = onResetQuad,
                     modifier = Modifier.semantics { contentDescription = "Reset corners" },
                 ) {
-                    Icon(Icons.Filled.Refresh, contentDescription = null, tint = DeepRichRed)
+                    Icon(Icons.Filled.Refresh, contentDescription = null, tint = Ink)
                 }
-                TextButton(onClick = onRetake) { Text("Retake", color = DeepRichRed) }
+                TextButton(onClick = onRetake) { Text("Retake", color = Ink) }
             }
         }
 
@@ -149,7 +149,7 @@ fun PrepareScreen(
                 text = "Best available mosaic — adjust corners if needed.",
                 style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                color = DeepRichRed,
+                color = Ink.copy(alpha = 0.7f),
             )
         }
 
@@ -170,7 +170,7 @@ fun PrepareScreen(
                     onCornerMove = onCornerMove,
                 )
             } else {
-                CircularProgressIndicator(color = DeepRichRed)
+                CircularProgressIndicator(color = Lime400)
             }
             if (isDetectingQuad) {
                 Text(
@@ -186,7 +186,7 @@ fun PrepareScreen(
         Text(
             text = "Enhance",
             style = MaterialTheme.typography.labelLarge,
-            color = DeepRichRed,
+            color = Lime400,
             modifier = Modifier.padding(horizontal = 16.dp),
         )
         Row(
@@ -211,8 +211,8 @@ fun PrepareScreen(
                         )
                     },
                     colors = FilterChipDefaults.filterChipColors(
-                        selectedContainerColor = DeepRichRed,
-                        selectedLabelColor = SoftYellow,
+                        selectedContainerColor = Lime400,
+                        selectedLabelColor = Ink,
                     ),
                 )
             }
@@ -221,7 +221,7 @@ fun PrepareScreen(
         if (prepareError != null) {
             Text(
                 text = prepareError,
-                color = DeepRichRed,
+                color = Lime400,
                 style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.padding(horizontal = 16.dp),
             )
@@ -234,21 +234,21 @@ fun PrepareScreen(
                 .fillMaxWidth()
                 .padding(16.dp)
                 .height(56.dp)
-                .semantics { contentDescription = "Ready for OCR" },
+                .semantics { contentDescription = "Save page" },
             shape = RoundedCornerShape(8.dp),
             colors = ButtonDefaults.buttonColors(
-                containerColor = DeepRichRed,
-                contentColor = SoftYellow,
+                containerColor = Lime400,
+                contentColor = Ink,
             ),
         ) {
             if (isPreparingPage) {
                 CircularProgressIndicator(
                     modifier = Modifier.size(22.dp),
-                    color = SoftYellow,
+                    color = Ink,
                     strokeWidth = 2.dp,
                 )
             } else {
-                Text("Ready for OCR", style = MaterialTheme.typography.labelLarge)
+                Text("Save page", style = MaterialTheme.typography.labelLarge)
             }
         }
         Spacer(modifier = Modifier.height(8.dp))
@@ -296,8 +296,8 @@ private fun CornerEditor(
                     for (i in 1 until pts.size) lineTo(pts[i].x, pts[i].y)
                     close()
                 }
-                drawPath(path, color = SoftYellow.copy(alpha = 0.22f))
-                drawPath(path, color = SoftYellow, style = Stroke(width = 3f))
+                drawPath(path, color = Lime400.copy(alpha = 0.22f))
+                drawPath(path, color = Lime400, style = Stroke(width = 3f))
             }
 
             quad.points().forEachIndexed { index, (ix, iy) ->
@@ -317,7 +317,7 @@ private fun CornerEditor(
                             )
                         }
                         .size(28.dp)
-                        .background(DeepRichRed, CircleShape)
+                        .background(Lime400, CircleShape)
                         .semantics { contentDescription = "Corner ${index + 1}" }
                         .pointerInput(scale, originX, originY, fullWidth, fullHeight, index) {
                             detectDragGestures(
@@ -421,13 +421,13 @@ private fun CropLoupe(
         }
 
         drawCircle(
-            color = SoftYellow,
+            color = Ink,
             radius = r,
             center = Offset(cx, cy),
             style = Stroke(width = 3.dp.toPx()),
         )
         drawCircle(
-            color = DeepRichRed,
+            color = Lime400,
             radius = r - 2.dp.toPx(),
             center = Offset(cx, cy),
             style = Stroke(width = 2.dp.toPx()),
@@ -435,11 +435,11 @@ private fun CropLoupe(
 
         val cross = 14.dp.toPx()
         val stroke = 2.dp.toPx()
-        drawLine(DeepRichRed, Offset(cx - cross, cy), Offset(cx + cross, cy), strokeWidth = stroke)
-        drawLine(DeepRichRed, Offset(cx, cy - cross), Offset(cx, cy + cross), strokeWidth = stroke)
-        drawCircle(color = SoftYellow, radius = 3.dp.toPx(), center = Offset(cx, cy))
+        drawLine(Lime400, Offset(cx - cross, cy), Offset(cx + cross, cy), strokeWidth = stroke)
+        drawLine(Lime400, Offset(cx, cy - cross), Offset(cx, cy + cross), strokeWidth = stroke)
+        drawCircle(color = Ink, radius = 3.dp.toPx(), center = Offset(cx, cy))
         drawCircle(
-            color = DeepRichRed,
+            color = Lime400,
             radius = 3.dp.toPx(),
             center = Offset(cx, cy),
             style = Stroke(width = 1.5.dp.toPx()),

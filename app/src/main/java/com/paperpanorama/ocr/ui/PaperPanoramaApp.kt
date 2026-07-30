@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -35,6 +36,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.paperpanorama.ocr.camera.CaptureStore
+import com.paperpanorama.ocr.camera.MlKitDocumentScan
 import com.paperpanorama.ocr.session.ScanNavEvent
 import com.paperpanorama.ocr.session.ScanSessionViewModel
 import com.paperpanorama.ocr.ui.navigation.Destinations
@@ -44,6 +46,7 @@ import com.paperpanorama.ocr.ui.screens.HomeScreen
 import com.paperpanorama.ocr.ui.screens.OcrReadyScreen
 import com.paperpanorama.ocr.ui.screens.PrepareScreen
 import com.paperpanorama.ocr.ui.screens.StitchFailureSheet
+import com.paperpanorama.ocr.ui.screens.StitchReviewScreen
 import com.paperpanorama.ocr.ui.screens.StitchingScreen
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
@@ -64,6 +67,7 @@ fun PaperPanoramaApp(
     var awaitingSystemPermission by remember { mutableStateOf(false) }
     var launchSystemPermission by remember { mutableStateOf(false) }
     var showEarlyFinishConfirm by remember { mutableStateOf(false) }
+    var pendingLaunchScanner by remember { mutableStateOf(false) }
 
     fun hasCameraPermission(): Boolean =
         ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
@@ -76,6 +80,49 @@ fun PaperPanoramaApp(
                 Manifest.permission.CAMERA,
             )
 
+    fun openGuidedCameraFallback() {
+        navController.navigate(Destinations.Camera.route) {
+            popUpTo(Destinations.Home.route) { inclusive = false }
+            launchSingleTop = true
+        }
+    }
+
+    val documentScannerLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult(),
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val uris = MlKitDocumentScan.pageImageUris(result.data)
+            viewModel.onMlKitDocumentPages(uris)
+        } else {
+            viewModel.onMlKitDocumentCancelled()
+        }
+    }
+
+    fun launchMlKitDocumentScanner() {
+        val act = activity
+        if (act == null) {
+            scope.launch {
+                snackbarHostState.showSnackbar("Camera unavailable")
+            }
+            openGuidedCameraFallback()
+            return
+        }
+        MlKitDocumentScan.startScanIntent(act)
+            .addOnSuccessListener { intentSender ->
+                documentScannerLauncher.launch(
+                    IntentSenderRequest.Builder(intentSender).build(),
+                )
+            }
+            .addOnFailureListener { e ->
+                scope.launch {
+                    snackbarHostState.showSnackbar(
+                        e.message ?: "Document scanner unavailable — opening guided camera",
+                    )
+                }
+                openGuidedCameraFallback()
+            }
+    }
+
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
@@ -85,7 +132,6 @@ fun PaperPanoramaApp(
             viewModel.onPermissionGranted()
         } else {
             viewModel.onPermissionDenied()
-            // Permanently denied → offer Settings
             if (!shouldShowRationale()) {
                 scope.launch {
                     val result = snackbarHostState.showSnackbar(
@@ -118,7 +164,6 @@ fun PaperPanoramaApp(
             hasCameraPermission() -> viewModel.onNewScanClicked(true)
             shouldShowRationale() -> showPermissionRationale = true
             else -> {
-                // First ask (or return from Settings): go straight to system prompt
                 launchSystemPermission = true
             }
         }
@@ -133,7 +178,16 @@ fun PaperPanoramaApp(
                     }
                 }
                 ScanNavEvent.ToCamera -> {
+                    // Primary: Google ML Kit Document Scanner (then our stitch pipeline).
+                    navController.navigate(Destinations.Home.route) {
+                        popUpTo(Destinations.Home.route) { inclusive = true }
+                    }
+                    pendingLaunchScanner = true
+                }
+                ScanNavEvent.ToGuidedCamera -> {
+                    // Fallback: CameraX guided multi-shot when ML Kit unavailable.
                     navController.navigate(Destinations.Camera.route) {
+                        popUpTo(Destinations.Home.route) { inclusive = false }
                         launchSingleTop = true
                     }
                 }
@@ -142,15 +196,20 @@ fun PaperPanoramaApp(
                         launchSingleTop = true
                     }
                 }
+                ScanNavEvent.ToStitchReview -> {
+                    navController.navigate(Destinations.StitchReview.route) {
+                        launchSingleTop = true
+                    }
+                }
                 ScanNavEvent.ToPrepare -> {
                     navController.navigate(Destinations.Prepare.route) {
-                        popUpTo(Destinations.Camera.route) { inclusive = false }
+                        popUpTo(Destinations.Home.route) { inclusive = false }
                         launchSingleTop = true
                     }
                 }
                 ScanNavEvent.ToOcrReady -> {
                     navController.navigate(Destinations.OcrReady.route) {
-                        popUpTo(Destinations.Camera.route) { inclusive = false }
+                        popUpTo(Destinations.Home.route) { inclusive = false }
                         launchSingleTop = true
                     }
                 }
@@ -171,6 +230,13 @@ fun PaperPanoramaApp(
         }
     }
 
+    LaunchedEffect(pendingLaunchScanner) {
+        if (pendingLaunchScanner) {
+            pendingLaunchScanner = false
+            launchMlKitDocumentScanner()
+        }
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
         NavHost(
             navController = navController,
@@ -185,6 +251,7 @@ fun PaperPanoramaApp(
                 )
             }
             composable(Destinations.Camera.route) {
+                // Guided CameraX fallback when Google Document Scanner fails / unavailable.
                 val store = remember { CaptureStore(context) }
                 CameraScreen(
                     mode = state.mode,
@@ -193,10 +260,12 @@ fun PaperPanoramaApp(
                     coverage = state.coverage,
                     mosaicThumb = state.mosaicThumb,
                     isIngestingCapture = state.isIngestingCapture,
+                    lastIngestAccepted = state.lastIngestAccepted,
+                    pageSpaceTracker = viewModel.pageSpaceTracker(),
                     sessionDir = store.sessionDir(state.sessionId),
                     onModeChange = viewModel::setMode,
-                    onCaptured = { file, rotation ->
-                        viewModel.addCapturedFile(file, rotation)
+                    onCaptured = { file, rotation, tile ->
+                        viewModel.addCapturedFile(file, rotation, forTileIndex = tile)
                     },
                     onRemoveFrame = viewModel::removeFrameAt,
                     onMoveFrame = viewModel::moveFrame,
@@ -206,6 +275,8 @@ fun PaperPanoramaApp(
                         navController.popBackStack(Destinations.Home.route, false)
                     },
                     onClearWarn = viewModel::clearFeatureWarn,
+                    onLivePageMapped = viewModel::onLivePageMapped,
+                    onConsumeIngestResult = viewModel::consumeIngestResult,
                 )
             }
             composable(Destinations.Stitching.route) {
@@ -223,6 +294,19 @@ fun PaperPanoramaApp(
                         onCancel = viewModel::dismissFailureRetake,
                     )
                 }
+            }
+            composable(Destinations.StitchReview.route) {
+                StitchReviewScreen(
+                    inputUris = state.auditInputUris.ifEmpty { state.frames.map { it.uri } },
+                    resultUri = state.mosaicUri,
+                    usedFallback = state.usedFallback,
+                    auditPathHint = state.auditDirHint,
+                    onContinue = viewModel::onStitchReviewContinue,
+                    onBack = {
+                        viewModel.onStitchReviewBack()
+                        navController.popBackStack(Destinations.Home.route, false)
+                    },
+                )
             }
             composable(Destinations.Prepare.route) {
                 PrepareScreen(
@@ -245,7 +329,7 @@ fun PaperPanoramaApp(
                                 launchSingleTop = true
                             }
                         } else {
-                            navController.popBackStack(Destinations.Camera.route, false)
+                            navController.popBackStack(Destinations.Home.route, false)
                         }
                     },
                 )
@@ -257,7 +341,9 @@ fun PaperPanoramaApp(
                     pageHeight = state.pageHeight,
                     library = state.library,
                     libraryScanId = state.libraryScanId,
+                    toolsEnabled = !state.isSavingPage && !state.isPreparingPage,
                     onSelectScan = viewModel::selectLibraryScan,
+                    onAutoEnhance = viewModel::reEnhancePage,
                     onCrop = viewModel::beginCrop,
                     onRotate = viewModel::rotateOcrPage,
                     onRetake = viewModel::retake,
@@ -310,7 +396,7 @@ fun PaperPanoramaApp(
                     else -> ""
                 }
                 Text(
-                    "Coverage is ${state.coverage.coveragePercent}%.$endsNote More shots usually improve OCR. Finish anyway?",
+                    "Coverage is ${state.coverage.coveragePercent}%.$endsNote More shots usually improve the stitch. Finish anyway?",
                 )
             },
             confirmButton = {

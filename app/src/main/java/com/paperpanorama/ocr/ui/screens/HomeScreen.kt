@@ -51,8 +51,9 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.paperpanorama.ocr.domain.SavedScan
-import com.paperpanorama.ocr.ui.theme.DeepRichRed
-import com.paperpanorama.ocr.ui.theme.SoftYellow
+import com.paperpanorama.ocr.ui.components.PrimaryButton
+import com.paperpanorama.ocr.ui.theme.Radius
+import com.paperpanorama.ocr.ui.theme.Spacing
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -61,8 +62,7 @@ import java.util.Locale
 private const val PREVIEW_PER_MONTH = 6
 
 /**
- * Home gallery — month sections + 3-col rounded grid (reference layout),
- * SoftYellow / DeepRichRed brand, FAB to capture new scans.
+ * Home gallery — Canvas / lime brand, Tap-to-scan empty state, FAB for new scans.
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -75,11 +75,12 @@ fun HomeScreen(
     var pendingDelete by remember { mutableStateOf<SavedScan?>(null) }
     var expandedMonths by remember { mutableStateOf(setOf<String>()) }
     val sections = remember(scans) { groupScansByMonth(scans) }
+    val scheme = MaterialTheme.colorScheme
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(SoftYellow),
+            .background(scheme.background),
     ) {
         LazyColumn(
             modifier = Modifier
@@ -87,8 +88,8 @@ fun HomeScreen(
                 .statusBarsPadding()
                 .navigationBarsPadding(),
             contentPadding = PaddingValues(
-                start = 16.dp,
-                end = 16.dp,
+                start = Spacing.md,
+                end = Spacing.md,
                 top = 20.dp,
                 bottom = 100.dp,
             ),
@@ -97,17 +98,17 @@ fun HomeScreen(
                 Text(
                     text = "TileOCR",
                     style = MaterialTheme.typography.displayLarge,
-                    color = DeepRichRed,
+                    color = scheme.onBackground,
                 )
-                Spacer(modifier = Modifier.height(6.dp))
+                Spacer(modifier = Modifier.height(Spacing.xs + 2.dp))
                 Text(
                     text = if (scans.isEmpty()) {
                         "Scan pages into your gallery"
                     } else {
-                        "${scans.size} ${if (scans.size == 1) "page" else "pages"}"
+                        "${scans.size} ${if (scans.size == 1) "page" else "pages"} · tap to open"
                     },
                     style = MaterialTheme.typography.bodyLarge,
-                    color = DeepRichRed.copy(alpha = 0.65f),
+                    color = scheme.onSurfaceVariant,
                 )
                 Spacer(modifier = Modifier.height(20.dp))
             }
@@ -156,8 +157,8 @@ fun HomeScreen(
                 .padding(end = 20.dp, bottom = 20.dp)
                 .semantics { contentDescription = "New scan" },
             shape = CircleShape,
-            containerColor = DeepRichRed,
-            contentColor = SoftYellow,
+            containerColor = scheme.primary,
+            contentColor = scheme.onPrimary,
         ) {
             Icon(
                 imageVector = Icons.Outlined.DocumentScanner,
@@ -179,12 +180,12 @@ fun HomeScreen(
                         pendingDelete = null
                     },
                 ) {
-                    Text("Delete", color = DeepRichRed)
+                    Text("Delete", color = scheme.onBackground)
                 }
             },
             dismissButton = {
                 TextButton(onClick = { pendingDelete = null }) {
-                    Text("Cancel")
+                    Text("Cancel", color = scheme.onSurfaceVariant)
                 }
             },
         )
@@ -198,6 +199,7 @@ private fun MonthSectionHeader(
     expanded: Boolean,
     onViewAll: () -> Unit,
 ) {
+    val scheme = MaterialTheme.colorScheme
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -207,13 +209,13 @@ private fun MonthSectionHeader(
         Text(
             text = label,
             style = MaterialTheme.typography.headlineMedium,
-            color = DeepRichRed,
+            color = scheme.onBackground,
             modifier = Modifier.weight(1f),
         )
         if (total > PREVIEW_PER_MONTH) {
             Row(
                 modifier = Modifier
-                    .clip(RoundedCornerShape(8.dp))
+                    .clip(RoundedCornerShape(Radius.sm))
                     .clickable(onClick = onViewAll)
                     .padding(horizontal = 6.dp, vertical = 4.dp)
                     .semantics {
@@ -225,13 +227,13 @@ private fun MonthSectionHeader(
                 Text(
                     text = if (expanded) "Show less" else "View All",
                     style = MaterialTheme.typography.labelLarge,
-                    color = DeepRichRed.copy(alpha = 0.7f),
+                    color = scheme.onSurfaceVariant,
                 )
                 if (!expanded) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Outlined.ArrowForward,
                         contentDescription = null,
-                        tint = DeepRichRed.copy(alpha = 0.7f),
+                        tint = scheme.onSurfaceVariant,
                         modifier = Modifier.size(16.dp),
                     )
                 }
@@ -247,6 +249,7 @@ private fun MonthPhotoGrid(
     onOpen: (String) -> Unit,
     onDelete: (SavedScan) -> Unit,
 ) {
+    val scheme = MaterialTheme.colorScheme
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         scans.chunked(3).forEach { row ->
             Row(
@@ -258,14 +261,16 @@ private fun MonthPhotoGrid(
                         modifier = Modifier
                             .weight(1f)
                             .aspectRatio(1f)
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(DeepRichRed.copy(alpha = 0.08f))
+                            .clip(RoundedCornerShape(Radius.md))
+                            .background(scheme.surfaceVariant)
+                            .border(1.dp, scheme.outline, RoundedCornerShape(Radius.md))
                             .combinedClickable(
                                 onClick = { onOpen(scan.id) },
                                 onLongClick = { onDelete(scan) },
                             )
                             .semantics {
-                                contentDescription = "Open ${scan.title}. Long press to delete."
+                                contentDescription =
+                                    "Open ${scan.title}. Long press to delete."
                             },
                     ) {
                         AsyncImage(
@@ -276,7 +281,6 @@ private fun MonthPhotoGrid(
                         )
                     }
                 }
-                // Pad incomplete rows so cells stay equal width.
                 repeat(3 - row.size) {
                     Spacer(modifier = Modifier.weight(1f))
                 }
@@ -287,6 +291,8 @@ private fun MonthPhotoGrid(
 
 @Composable
 private fun EmptyGallery(onNewScan: () -> Unit) {
+    val scheme = MaterialTheme.colorScheme
+    val dashShape = RoundedCornerShape(Radius.xxl)
     AnimatedVisibility(
         visible = true,
         enter = fadeIn(tween(280, easing = FastOutSlowInEasing)) +
@@ -296,42 +302,47 @@ private fun EmptyGallery(onNewScan: () -> Unit) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(vertical = 36.dp)
-                .clip(RoundedCornerShape(20.dp))
-                .border(
-                    width = 1.5.dp,
-                    color = DeepRichRed.copy(alpha = 0.22f),
-                    shape = RoundedCornerShape(20.dp),
-                )
-                .background(DeepRichRed.copy(alpha = 0.05f))
-                .clickable(onClick = onNewScan)
-                .semantics { contentDescription = "Start your first scan" }
-                .padding(vertical = 56.dp, horizontal = 24.dp),
+                .padding(vertical = Spacing.xl),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Icon(
-                imageVector = Icons.Outlined.DocumentScanner,
-                contentDescription = null,
-                tint = DeepRichRed.copy(alpha = 0.5f),
-                modifier = Modifier.size(72.dp),
-            )
-            Spacer(modifier = Modifier.height(24.dp))
-            Text(
-                text = "No pages yet",
-                style = MaterialTheme.typography.headlineMedium,
-                color = DeepRichRed,
-            )
-            Spacer(modifier = Modifier.height(10.dp))
-            Text(
-                text = "Capture overlapping shots of a page.\nStitch, crop, then OCR — all offline.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = DeepRichRed.copy(alpha = 0.58f),
-            )
-            Spacer(modifier = Modifier.height(28.dp))
-            Text(
-                text = "Tap to scan",
-                style = MaterialTheme.typography.labelLarge,
-                color = DeepRichRed,
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(dashShape)
+                    .border(
+                        width = 2.dp,
+                        color = scheme.outline,
+                        shape = dashShape,
+                    )
+                    .background(scheme.surfaceVariant)
+                    .clickable(onClick = onNewScan)
+                    .semantics { contentDescription = "Start your first scan" }
+                    .padding(vertical = Spacing.huge, horizontal = Spacing.lg),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.DocumentScanner,
+                    contentDescription = null,
+                    tint = scheme.onSurfaceVariant,
+                    modifier = Modifier.size(72.dp),
+                )
+                Spacer(modifier = Modifier.height(Spacing.lg))
+                Text(
+                    text = "Tap to scan",
+                    style = MaterialTheme.typography.headlineMedium,
+                    color = scheme.onBackground,
+                )
+                Spacer(modifier = Modifier.height(Spacing.sm))
+                Text(
+                    text = "Capture overlapping shots of a page.\nStitch, crop, and save — all on device.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = scheme.onSurfaceVariant,
+                )
+            }
+            Spacer(modifier = Modifier.height(Spacing.lg))
+            PrimaryButton(
+                text = "Scan Document",
+                onClick = onNewScan,
             )
         }
     }

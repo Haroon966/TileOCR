@@ -97,15 +97,16 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import coil.compose.AsyncImage
 import com.paperpanorama.ocr.camera.LivePageAnalyzer
 import com.paperpanorama.ocr.camera.StabilityMonitor
+import com.paperpanorama.ocr.capture.PageSpaceTracker
+import com.paperpanorama.ocr.domain.BandScanState
 import com.paperpanorama.ocr.domain.CaptureFrame
 import com.paperpanorama.ocr.domain.CaptureMode
 import com.paperpanorama.ocr.domain.CoverageSnapshot
 import com.paperpanorama.ocr.domain.LivePageHint
-import com.paperpanorama.ocr.domain.ScanGuideDirection
 import com.paperpanorama.ocr.ui.theme.CameraChrome
-import com.paperpanorama.ocr.ui.theme.DeepRichRed
 import com.paperpanorama.ocr.ui.theme.PaperPanoramaTheme
-import com.paperpanorama.ocr.ui.theme.SoftYellow
+import com.paperpanorama.ocr.ui.theme.Ink
+import com.paperpanorama.ocr.ui.theme.Lime400
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -123,14 +124,18 @@ fun CameraScreen(
     coverage: CoverageSnapshot,
     mosaicThumb: Bitmap? = null,
     isIngestingCapture: Boolean,
+    lastIngestAccepted: Boolean? = null,
+    pageSpaceTracker: PageSpaceTracker? = null,
     sessionDir: File,
     onModeChange: (CaptureMode) -> Unit,
-    onCaptured: (File, Int) -> Unit,
+    onCaptured: (File, Int, Int) -> Unit,
     onRemoveFrame: (Int) -> Unit,
     onMoveFrame: (Int, Int) -> Unit,
     onDonePanorama: () -> Unit,
     onBack: () -> Unit,
     onClearWarn: () -> Unit,
+    onLivePageMapped: () -> Unit = {},
+    onConsumeIngestResult: () -> Unit = {},
 ) {
     PaperPanoramaTheme(cameraChrome = true) {
         val context = LocalContext.current
@@ -166,13 +171,21 @@ fun CameraScreen(
                 .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
                 .build()
         }
+        val imageAnalysis = remember {
+            ImageAnalysis.Builder()
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
+                .build()
+        }
         var camera by remember { mutableStateOf<Camera?>(null) }
+        var cameraBound by remember { mutableStateOf(false) }
         val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
 
         val stability = remember { StabilityMonitor(context) }
         var shaky by remember { mutableStateOf(false) }
         var needsMove by remember { mutableStateOf(false) }
         var autoCapturing by remember { mutableStateOf(false) }
+        var pendingTile by remember { mutableIntStateOf(-1) }
         var liveHint by remember { mutableStateOf(LivePageHint.Idle) }
         val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
         val liveAnalyzer = remember {
@@ -181,13 +194,57 @@ fun CameraScreen(
             }
         }
 
+        LaunchedEffect(pageSpaceTracker) {
+            liveAnalyzer.setPageSpaceTracker(pageSpaceTracker)
+        }
+        DisposableEffect(Unit) {
+            onDispose { liveAnalyzer.setPageSpaceTracker(null) }
+        }
         LaunchedEffect(coverage.activeTileIndex) {
             liveAnalyzer.setActiveTile(coverage.activeTileIndex)
+        }
+        LaunchedEffect(coverage.pageMapped) {
+            liveAnalyzer.setPageMapped(coverage.pageMapped)
+        }
+        LaunchedEffect(liveHint.pageMapped) {
+            if (liveHint.pageMapped && !coverage.pageMapped) onLivePageMapped()
+        }
+        LaunchedEffect(lastIngestAccepted) {
+            when (lastIngestAccepted) {
+                true -> {
+                    stability.markCapturePoint()
+                    needsMove = true
+                    onConsumeIngestResult()
+                }
+                false -> {
+                    stability.allowImmediateCapture()
+                    needsMove = false
+                    onConsumeIngestResult()
+                }
+                null -> Unit
+            }
+        }
+
+        fun gatesOk(live: LivePageHint, requireMove: Boolean): Boolean {
+            if (coverage.readyToFinish) return false
+            if (stability.isShaky) return false
+            if (requireMove && !stability.movedSinceMark) return false
+            if (!live.pageMapped) return false
+            if (live.tileQuads.size < CoverageSnapshot.TILE_COUNT) return false
+            if (live.trackingLost) return false
+            if (!live.featuresOk) return false
+            if (!live.iouStable) return false
+            if (!live.activeTileAligned) return false
+            if (live.pullBack && !coverage.pageMapped) return false
+            if (!coverage.pageMapped && !live.pageMapped) return false
+            return true
         }
 
         fun fireCapture() {
             if (autoCapturing || isIngestingCapture) return
             autoCapturing = true
+            val tileAtShutter = coverage.activeTileIndex
+            pendingTile = tileAtShutter
             view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
             if (!reduceMotion) {
                 shutterScale = 0.88f
@@ -206,19 +263,20 @@ fun CameraScreen(
                 object : ImageCapture.OnImageSavedCallback {
                     override fun onImageSaved(output: ImageCapture.OutputFileResults) {
                         mainExecutor.execute {
-                            if (mode == CaptureMode.Panorama) {
-                                stability.markCapturePoint()
-                                needsMove = true
-                            }
+                            // Keep autoCapturing true until ingest clears isIngestingCapture.
+                            onCaptured(out, rotationSnapshot, tileAtShutter)
+                            pendingTile = -1
+                            // Do NOT markCapturePoint here — ViewModel signals accept vs recapture.
                             autoCapturing = false
-                            onCaptured(out, rotationSnapshot)
                         }
                     }
 
                     override fun onError(exception: ImageCaptureException) {
                         Log.e("CameraScreen", "Capture failed", exception)
                         mainExecutor.execute {
+                            pendingTile = -1
                             autoCapturing = false
+                            stability.allowImmediateCapture()
                             scope.launch { snackbar.showSnackbar("Capture failed — hold still and retry") }
                         }
                     }
@@ -242,6 +300,7 @@ fun CameraScreen(
                     val rotation = UseCase.snapToSurfaceRotation(orientation)
                     targetRotation = rotation
                     imageCapture.targetRotation = rotation
+                    imageAnalysis.targetRotation = rotation
                 }
             }
             orientationListener.enable()
@@ -249,66 +308,66 @@ fun CameraScreen(
                 ticker.cancel()
                 stability.stop()
                 orientationListener.disable()
+                runCatching {
+                    ProcessCameraProvider.getInstance(context).get().unbindAll()
+                }
+                cameraBound = false
+                camera = null
                 cameraExecutor.shutdown()
                 analysisExecutor.shutdown()
             }
         }
 
-        // One-by-one tile capture: align → hold still → shutter. Never auto-finish.
-        LaunchedEffect(mode, coverage.activeTileIndex, coverage.readyToFinish, coverage.goodTileCount, isIngestingCapture, liveHint.activeTileAligned) {
+        // Stable auto-capture loop (keys do not include flickering live flags).
+        LaunchedEffect(mode) {
             if (mode != CaptureMode.Panorama) return@LaunchedEffect
-            if (frames.isEmpty()) {
-                stability.allowImmediateCapture()
-                needsMove = false
-            }
-            // Stop auto-loop when all 4 good — wait for user Done.
-            while (isActive && mode == CaptureMode.Panorama && !coverage.readyToFinish) {
-                if (isIngestingCapture || autoCapturing) {
-                    delay(100)
+            stability.allowImmediateCapture()
+            needsMove = false
+            while (isActive && mode == CaptureMode.Panorama) {
+                if (coverage.readyToFinish) {
+                    delay(200)
                     continue
                 }
-                if (!stability.movedSinceMark && coverage.goodTileCount > 0) {
+                if (isIngestingCapture || autoCapturing) {
+                    delay(80)
+                    continue
+                }
+                val softActive =
+                    coverage.cells.getOrNull(coverage.activeTileIndex) == BandScanState.Soft
+                val requireMove =
+                    coverage.acceptedTiles > 0 && !softActive && !coverage.lastShotBlurry
+                if (requireMove && !stability.movedSinceMark) {
                     needsMove = true
                     delay(120)
                     continue
                 }
                 needsMove = false
-                if (stability.isShaky) {
-                    delay(80)
-                    continue
-                }
-                val live = liveHint
-                if (live.pullBack && !live.activeTileAligned) {
-                    delay(120)
-                    continue
-                }
-                if (live.paperQuad.isNotEmpty() && !live.featuresOk) {
-                    delay(120)
-                    continue
-                }
-                // Wait until the highlighted tile is aligned in the viewfinder.
-                if (live.tileQuads.isNotEmpty() && !live.activeTileAligned) {
+                if (!gatesOk(liveHint, requireMove = requireMove)) {
                     delay(100)
                     continue
                 }
-                if (live.tileQuads.isNotEmpty() && !live.iouStable) {
-                    delay(80)
-                    continue
+                // Hold still while gates remain true.
+                val holdStart = System.currentTimeMillis()
+                var ok = true
+                while (isActive && System.currentTimeMillis() - holdStart < STABLE_HOLD_MS) {
+                    if (!gatesOk(liveHint, requireMove = requireMove) || stability.isShaky) {
+                        ok = false
+                        break
+                    }
+                    delay(40)
                 }
-                delay(STABLE_HOLD_MS)
-                if (!isActive || mode != CaptureMode.Panorama || coverage.readyToFinish) return@LaunchedEffect
-                if (stability.isShaky || isIngestingCapture || autoCapturing) continue
-                if (!stability.movedSinceMark && coverage.goodTileCount > 0) continue
-                val liveAfter = liveHint
-                if (liveAfter.tileQuads.isNotEmpty() && !liveAfter.activeTileAligned) continue
+                if (!ok || !isActive) continue
+                if (isIngestingCapture || autoCapturing || coverage.readyToFinish) continue
+                if (!gatesOk(liveHint, requireMove = requireMove)) continue
                 fireCapture()
-                while (isActive && autoCapturing) delay(50)
+                // Wait for shutter + ingest to finish (autoCapturing cleared after onCaptured).
+                while (isActive && autoCapturing) delay(40)
                 val waitStart = System.currentTimeMillis()
-                while (isActive && !isIngestingCapture && System.currentTimeMillis() - waitStart < 2000) {
-                    delay(50)
+                while (isActive && !isIngestingCapture && System.currentTimeMillis() - waitStart < 2500) {
+                    delay(40)
                 }
-                while (isActive && isIngestingCapture) delay(50)
-                delay(350)
+                while (isActive && isIngestingCapture) delay(40)
+                delay(300)
             }
         }
 
@@ -340,32 +399,9 @@ fun CameraScreen(
                         )
                         scaleType = PreviewView.ScaleType.FILL_CENTER
                         implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-                    }
-                },
-                modifier = Modifier.fillMaxSize(),
-                update = { previewView ->
-                    val providerFuture = ProcessCameraProvider.getInstance(context)
-                    providerFuture.addListener({
-                        val provider = providerFuture.get()
-                        val preview = Preview.Builder().build().also {
-                            it.surfaceProvider = previewView.surfaceProvider
-                        }
-                        val analysis = ImageAnalysis.Builder()
-                            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
-                            .build()
-                            .also { it.setAnalyzer(analysisExecutor, liveAnalyzer) }
-                        provider.unbindAll()
-                        camera = provider.bindToLifecycle(
-                            lifecycleOwner,
-                            CameraSelector.DEFAULT_BACK_CAMERA,
-                            preview,
-                            imageCapture,
-                            analysis,
-                        )
-                        previewView.setOnTouchListener { v, event ->
+                        setOnTouchListener { v, event ->
                             if (event.action == android.view.MotionEvent.ACTION_UP) {
-                                val factory = previewView.meteringPointFactory
+                                val factory = meteringPointFactory
                                 val point = factory.createPoint(event.x, event.y)
                                 val action = FocusMeteringAction.Builder(point).build()
                                 camera?.cameraControl?.startFocusAndMetering(action)
@@ -374,6 +410,32 @@ fun CameraScreen(
                             }
                             true
                         }
+                    }
+                },
+                modifier = Modifier.fillMaxSize(),
+                update = { previewView ->
+                    if (cameraBound) {
+                        // Keep surface linked; do not rebind.
+                        return@AndroidView
+                    }
+                    val providerFuture = ProcessCameraProvider.getInstance(context)
+                    providerFuture.addListener({
+                        if (cameraBound) return@addListener
+                        val provider = providerFuture.get()
+                        val preview = Preview.Builder().build().also {
+                            it.surfaceProvider = previewView.surfaceProvider
+                        }
+                        imageAnalysis.setAnalyzer(analysisExecutor, liveAnalyzer)
+                        provider.unbindAll()
+                        camera = provider.bindToLifecycle(
+                            lifecycleOwner,
+                            CameraSelector.DEFAULT_BACK_CAMERA,
+                            preview,
+                            imageCapture,
+                            imageAnalysis,
+                        )
+                        cameraBound = true
+                        camera?.cameraControl?.enableTorch(flashOn)
                     }, mainExecutor)
                 },
             )
@@ -395,7 +457,7 @@ fun CameraScreen(
             focusPoint?.let { pt ->
                 Canvas(modifier = Modifier.fillMaxSize()) {
                     drawCircle(
-                        color = SoftYellow.copy(alpha = 0.95f),
+                        color = Lime400.copy(alpha = 0.95f),
                         radius = 28.dp.toPx(),
                         center = pt,
                         style = Stroke(width = 2.dp.toPx()),
@@ -420,7 +482,7 @@ fun CameraScreen(
                         Icon(
                             Icons.AutoMirrored.Filled.ArrowBack,
                             contentDescription = "Close camera",
-                            tint = SoftYellow,
+                            tint = Lime400,
                         )
                     }
                     Row {
@@ -431,7 +493,7 @@ fun CameraScreen(
                             Icon(
                                 if (flashOn) Icons.Filled.FlashOn else Icons.Filled.FlashOff,
                                 contentDescription = if (flashOn) "Flash on" else "Flash off",
-                                tint = SoftYellow,
+                                tint = Lime400,
                             )
                         }
                         IconButton(
@@ -441,7 +503,7 @@ fun CameraScreen(
                             Icon(
                                 if (gridOn) Icons.Filled.GridOn else Icons.Filled.GridOff,
                                 contentDescription = if (gridOn) "Hide grid" else "Show grid",
-                                tint = SoftYellow,
+                                tint = Lime400,
                             )
                         }
                     }
@@ -449,7 +511,7 @@ fun CameraScreen(
 
                 if (shaky && mode == CaptureMode.Panorama && !needsMove && !autoCapturing && !isIngestingCapture) {
                     Surface(
-                        color = DeepRichRed.copy(alpha = 0.95f),
+                        color = Ink.copy(alpha = 0.95f),
                         shape = RoundedCornerShape(8.dp),
                         modifier = Modifier
                             .align(Alignment.CenterHorizontally)
@@ -459,7 +521,7 @@ fun CameraScreen(
                             text = "Hold still…",
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                             style = MaterialTheme.typography.labelLarge,
-                            color = SoftYellow,
+                            color = Lime400,
                         )
                     }
                 }
@@ -467,13 +529,13 @@ fun CameraScreen(
                 if (mode == CaptureMode.Panorama) {
                     val coachHint = when {
                         coverage.readyToFinish ->
-                            "All 4 tiles look good — tap Done to stitch"
+                            "All cells locked — tap Done to stitch"
                         autoCapturing || isIngestingCapture -> "Capturing…"
                         liveHint.activeTileAligned ->
                             "Hold still — capturing ${CoverageSnapshot.tileLabel(coverage.activeTileIndex)}"
                         liveHint.pullBack -> liveHint.hint ?: "Pull back so the whole page shows"
                         liveHint.hint != null -> liveHint.hint!!
-                        needsMove && coverage.goodTileCount > 0 ->
+                        needsMove && coverage.acceptedTiles > 0 ->
                             "Move to ${CoverageSnapshot.tileLabel(coverage.activeTileIndex)}"
                         shaky -> "Hold still…"
                         else -> coverage.nextHint
@@ -514,12 +576,12 @@ fun CameraScreen(
                                             modifier = Modifier
                                                 .size(64.dp)
                                                 .clip(RoundedCornerShape(6.dp))
-                                                .border(1.dp, SoftYellow, RoundedCornerShape(6.dp)),
+                                                .border(1.dp, Lime400, RoundedCornerShape(6.dp)),
                                         )
                                         Icon(
                                             Icons.Filled.Close,
                                             contentDescription = "Delete tile ${index + 1}",
-                                            tint = SoftYellow,
+                                            tint = Lime400,
                                             modifier = Modifier
                                                 .align(Alignment.TopEnd)
                                                 .size(22.dp)
@@ -535,7 +597,7 @@ fun CameraScreen(
                                             Icon(
                                                 Icons.AutoMirrored.Filled.KeyboardArrowLeft,
                                                 contentDescription = "Move tile left",
-                                                tint = SoftYellow,
+                                                tint = Lime400,
                                             )
                                         }
                                         IconButton(
@@ -548,7 +610,7 @@ fun CameraScreen(
                                             Icon(
                                                 Icons.AutoMirrored.Filled.KeyboardArrowRight,
                                                 contentDescription = "Move tile right",
-                                                tint = SoftYellow,
+                                                tint = Lime400,
                                             )
                                         }
                                     }
@@ -558,11 +620,15 @@ fun CameraScreen(
                     }
                 }
 
-                if (mode == CaptureMode.Panorama && coverage.readyToFinish) {
+                if (mode == CaptureMode.Panorama && frames.isNotEmpty()) {
                     Text(
-                        text = "All 4 tiles ready — tap Done when you want to stitch",
+                        text = if (coverage.readyToFinish) {
+                            "Page grid locked — tap Done when you want to stitch"
+                        } else {
+                            "${frames.size} photo${if (frames.size == 1) "" else "s"} — tap Done anytime to stitch"
+                        },
                         style = MaterialTheme.typography.labelLarge,
-                        color = SoftYellow,
+                        color = Lime400,
                         modifier = Modifier
                             .align(Alignment.CenterHorizontally)
                             .padding(horizontal = 16.dp, vertical = 8.dp),
@@ -583,13 +649,13 @@ fun CameraScreen(
                         onModeChange(CaptureMode.Single)
                     }
                     Spacer(modifier = Modifier.weight(1f))
-                    if (mode == CaptureMode.Panorama && coverage.readyToFinish) {
+                    if (mode == CaptureMode.Panorama && frames.isNotEmpty()) {
                         Button(
                             onClick = onDonePanorama,
                             enabled = !isIngestingCapture && !autoCapturing,
                             colors = ButtonDefaults.buttonColors(
-                                containerColor = SoftYellow,
-                                contentColor = DeepRichRed,
+                                containerColor = Lime400,
+                                contentColor = Ink,
                             ),
                         ) {
                             Text("Done")
@@ -609,7 +675,7 @@ fun CameraScreen(
                                 .size(72.dp)
                                 .scale(shutterAnim)
                                 .clip(CircleShape)
-                                .border(4.dp, SoftYellow, CircleShape)
+                                .border(4.dp, Lime400, CircleShape)
                                 .semantics { contentDescription = "Capture" }
                                 .clickable(enabled = !isIngestingCapture) {
                                     if (shaky) {
@@ -621,7 +687,7 @@ fun CameraScreen(
                             contentAlignment = Alignment.Center,
                         ) {
                             Surface(
-                                color = DeepRichRed,
+                                color = Ink,
                                 shape = CircleShape,
                                 modifier = Modifier.size(56.dp),
                             ) {}
@@ -632,13 +698,13 @@ fun CameraScreen(
                             Box(
                                 modifier = Modifier
                                     .size(72.dp)
-                                    .border(4.dp, SoftYellow.copy(alpha = 0.7f), CircleShape),
+                                    .border(4.dp, Lime400.copy(alpha = 0.7f), CircleShape),
                                 contentAlignment = Alignment.Center,
                             ) {
                                 when {
                                     autoCapturing || isIngestingCapture -> {
                                         CircularProgressIndicator(
-                                            color = SoftYellow,
+                                            color = Lime400,
                                             strokeWidth = 3.dp,
                                             modifier = Modifier.size(36.dp),
                                         )
@@ -647,14 +713,14 @@ fun CameraScreen(
                                         Text(
                                             "MOVE",
                                             style = MaterialTheme.typography.labelLarge,
-                                            color = SoftYellow,
+                                            color = Lime400,
                                         )
                                     }
                                     else -> {
                                         Text(
                                             "AUTO",
                                             style = MaterialTheme.typography.labelLarge,
-                                            color = SoftYellow,
+                                            color = Lime400,
                                         )
                                     }
                                 }
@@ -668,7 +734,7 @@ fun CameraScreen(
                                     else -> "Hold still to capture"
                                 },
                                 style = MaterialTheme.typography.labelMedium,
-                                color = SoftYellow.copy(alpha = 0.9f),
+                                color = Lime400.copy(alpha = 0.9f),
                             )
                         }
                     }
@@ -716,14 +782,14 @@ private fun GuidedCoachBanner(
     reduceMotion: Boolean = false,
 ) {
     val statusLabel = when {
-        !coverage.progressDeterminate -> "Finding ends…"
+        !coverage.progressDeterminate -> "Mapping…"
         frameCount == 0 -> "${coverage.coveragePercent}%"
         else -> "${coverage.coveragePercent}% · sharp ${coverage.qualityPercent}%"
     }
     val a11yPct = if (coverage.progressDeterminate) {
         "Coverage ${coverage.coveragePercent} percent"
     } else {
-        "Finding page ends"
+        "Mapping page grid"
     }
     Surface(
         color = CameraChrome.copy(alpha = 0.92f),
@@ -745,12 +811,12 @@ private fun GuidedCoachBanner(
                 Text(
                     text = coverage.title,
                     style = MaterialTheme.typography.titleMedium,
-                    color = SoftYellow,
+                    color = Lime400,
                 )
                 Text(
                     text = statusLabel,
                     style = MaterialTheme.typography.labelMedium,
-                    color = SoftYellow.copy(alpha = 0.85f),
+                    color = Lime400.copy(alpha = 0.85f),
                 )
             }
             Spacer(modifier = Modifier.height(8.dp))
@@ -763,7 +829,7 @@ private fun GuidedCoachBanner(
             Text(
                 text = hintOverride ?: coverage.nextHint,
                 style = MaterialTheme.typography.bodyMedium,
-                color = SoftYellow,
+                color = Lime400,
             )
         }
     }
@@ -792,14 +858,14 @@ private fun CoverageBar(
             .height(8.dp)
             .clip(RoundedCornerShape(4.dp)),
     ) {
-        drawRect(SoftYellow.copy(alpha = 0.25f))
+        drawRect(Lime400.copy(alpha = 0.25f))
         val widthFrac = when {
             !indeterminate -> f
             reduceMotion -> 0.35f
             else -> pulseFrac
         }
         drawRect(
-            color = SoftYellow,
+            color = Lime400,
             size = androidx.compose.ui.geometry.Size(size.width * widthFrac, size.height),
         )
     }
@@ -812,10 +878,10 @@ private fun ModeChip(label: String, selected: Boolean, onClick: () -> Unit) {
         onClick = onClick,
         label = { Text(label) },
         colors = FilterChipDefaults.filterChipColors(
-            selectedContainerColor = SoftYellow,
-            selectedLabelColor = DeepRichRed,
+            selectedContainerColor = Lime400,
+            selectedLabelColor = Ink,
             containerColor = CameraChrome,
-            labelColor = SoftYellow,
+            labelColor = Lime400,
         ),
         modifier = Modifier.height(40.dp),
     )
@@ -824,7 +890,7 @@ private fun ModeChip(label: String, selected: Boolean, onClick: () -> Unit) {
 @Composable
 private fun DocumentGridOverlay(modifier: Modifier = Modifier) {
     Canvas(modifier = modifier) {
-        val color = SoftYellow.copy(alpha = 0.32f)
+        val color = Lime400.copy(alpha = 0.32f)
         val stroke = 1.dp.toPx()
         val thirdW = size.width / 3f
         val thirdH = size.height / 3f

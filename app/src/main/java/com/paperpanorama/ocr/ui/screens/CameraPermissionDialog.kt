@@ -11,8 +11,9 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import com.paperpanorama.ocr.ui.theme.DeepRichRed
-import com.paperpanorama.ocr.ui.theme.SoftYellow
+import com.paperpanorama.ocr.ui.theme.Canvas
+import com.paperpanorama.ocr.ui.theme.Ink
+import com.paperpanorama.ocr.ui.theme.Lime400
 
 @Composable
 fun CameraPermissionDialog(
@@ -38,8 +39,8 @@ fun CameraPermissionDialog(
                 onClick = onAllow,
                 shape = RoundedCornerShape(8.dp),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = DeepRichRed,
-                    contentColor = SoftYellow,
+                    containerColor = Lime400,
+                    contentColor = Ink,
                 ),
             ) {
                 Text("Allow")
@@ -50,8 +51,8 @@ fun CameraPermissionDialog(
                 Text("Not now")
             }
         },
-        containerColor = SoftYellow,
-        titleContentColor = DeepRichRed,
-        textContentColor = DeepRichRed,
+        containerColor = Canvas,
+        titleContentColor = Ink,
+        textContentColor = Ink,
     )
 }

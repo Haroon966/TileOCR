@@ -13,11 +13,11 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = 3
-        versionName = "0.3.0-ocr-ready"
+        versionName = "0.4.0-ocr"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         ndk {
-            // Phone is arm64; skip unused ABIs + drop ORT until OCR phase.
+            // Phone is arm64; skip unused ABIs.
             abiFilters += listOf("arm64-v8a")
         }
     }
@@ -52,8 +52,8 @@ android {
     }
 
     androidResources {
-        // Keep the segmentation model uncompressed so it can be memory-mapped.
-        noCompress += "tflite"
+        // Keep models uncompressed so they can be memory-mapped.
+        noCompress += listOf("tflite")
     }
 }
 
@@ -81,6 +81,9 @@ dependencies {
     implementation("androidx.camera:camera-camera2:1.4.0")
     implementation("androidx.camera:camera-lifecycle:1.4.0")
     implementation("androidx.camera:camera-view:1.4.0")
+
+    // Google ML Kit Document Scanner (Play services UI; up to 4 pages).
+    implementation("com.google.android.gms:play-services-mlkit-document-scanner:16.0.0")
 
     implementation("org.opencv:opencv:4.9.0")
     implementation("org.tensorflow:tensorflow-lite:2.16.1")

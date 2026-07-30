@@ -56,12 +56,22 @@ Thumbs.db
 # Optional / large model downloads (keep committed assets listed in README)
 app/src/main/assets/models/
 *.onnx
+!app/src/main/assets/ocr/**/*.onnx
 
 # Local scratch / personal capture samples
 input/
+audit/
+
+# Wireless adb saved phone IP
+scripts/.adb-wireless-ip
 
 # Editor / agent tooling (not part of the app)
 .cursor/
 skills/
 AGENTS.md
 docs/pinky-*.md
+
+# Python
+server/.venv/
+**/__pycache__/
+*.pyc

@@ -146,7 +146,7 @@ class OpenCvDocumentProcessor(
 
         val outDir = File(context.cacheDir, "ocr_ready").also { it.mkdirs() }
         val out = File(outDir, "page_${System.currentTimeMillis()}.jpg")
-        check(Imgcodecs.imwrite(out.absolutePath, enhanced)) { "Failed to write OCR-ready page" }
+        check(Imgcodecs.imwrite(out.absolutePath, enhanced)) { "Failed to write prepared page" }
         val w = enhanced.cols()
         val h = enhanced.rows()
         enhanced.release()
@@ -173,8 +173,9 @@ class OpenCvDocumentProcessor(
 
     private fun warpPerspective(src: Mat, quad: DocQuad): Mat {
         val (outWf, outHf) = QuadMath.edgeLengths(quad)
-        val outW = outWf.roundToInt().coerceIn(200, 4000)
-        val outH = outHf.roundToInt().coerceIn(200, 4000)
+        // Allow tall multi-page / panorama mosaics — old 4000 cap chopped stacked docs in half.
+        val outW = outWf.roundToInt().coerceIn(200, MAX_PAGE_SIDE)
+        val outH = outHf.roundToInt().coerceIn(200, MAX_PAGE_SIDE)
         val srcPts = MatOfPoint2f(
             Point(quad.tlX.toDouble(), quad.tlY.toDouble()),
             Point(quad.trX.toDouble(), quad.trY.toDouble()),
@@ -365,5 +366,8 @@ class OpenCvDocumentProcessor(
     companion object {
         /** Expand detected quad by 3% so glyphs touching the paper edge are never cropped. */
         private const val QUAD_SAFETY_FRAC = 0.03f
+
+        /** Tall panoramas / stacked pages (was 4000 — chopped audit mosaics in half). */
+        private const val MAX_PAGE_SIDE = 12000
     }
 }

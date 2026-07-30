@@ -2,7 +2,7 @@ package com.paperpanorama.ocr.domain
 
 import android.net.Uri
 
-/** One OCR-ready page kept in the local library. */
+/** One prepared page kept in the local library. */
 data class SavedScan(
     val id: String,
     val title: String,

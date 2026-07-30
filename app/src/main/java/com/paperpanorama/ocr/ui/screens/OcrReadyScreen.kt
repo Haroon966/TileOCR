@@ -7,6 +7,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -16,6 +17,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -54,9 +56,10 @@ import com.paperpanorama.ocr.domain.SavedScan
 import com.paperpanorama.ocr.ui.components.ZoomableImage
 import com.paperpanorama.ocr.ui.components.galleryPreviewMaxSide
 import com.paperpanorama.ocr.ui.components.isGalleryZoomed
-import com.paperpanorama.ocr.ui.theme.DeepRichRed
-import com.paperpanorama.ocr.ui.theme.SoftYellow
 import com.paperpanorama.ocr.util.BitmapDecode
+import com.paperpanorama.ocr.ui.theme.CameraChrome
+import com.paperpanorama.ocr.ui.theme.Ink
+import com.paperpanorama.ocr.ui.theme.Lime400
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.withContext
@@ -72,7 +75,9 @@ fun OcrReadyScreen(
     pageHeight: Int,
     library: List<SavedScan>,
     libraryScanId: String?,
+    toolsEnabled: Boolean = true,
     onSelectScan: (String) -> Unit,
+    onAutoEnhance: () -> Unit,
     onCrop: () -> Unit,
     onRotate: () -> Unit,
     onRetake: () -> Unit,
@@ -99,7 +104,7 @@ fun OcrReadyScreen(
                 GalleryPage(
                     id = libraryScanId ?: "session",
                     uri = pageUri,
-                    title = "OCR ready",
+                    title = "Page",
                     width = pageWidth,
                     height = pageHeight,
                 ),
@@ -144,7 +149,7 @@ fun OcrReadyScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFF1A0806))
+            .background(CameraChrome)
             .statusBarsPadding()
             .navigationBarsPadding(),
     ) {
@@ -159,7 +164,7 @@ fun OcrReadyScreen(
                 Text(
                     "Loading page…",
                     style = MaterialTheme.typography.bodyLarge,
-                    color = SoftYellow,
+                    color = Lime400,
                 )
             } else {
                 HorizontalPager(
@@ -180,7 +185,7 @@ fun OcrReadyScreen(
                 Text(
                     text = "${pagerState.currentPage + 1} / ${pages.size}",
                     style = MaterialTheme.typography.labelMedium,
-                    color = SoftYellow.copy(alpha = 0.7f),
+                    color = Lime400.copy(alpha = 0.7f),
                     modifier = Modifier
                         .align(Alignment.TopCenter)
                         .padding(top = 12.dp)
@@ -193,7 +198,7 @@ fun OcrReadyScreen(
 
         // Bottom tool sheet — matches opened-image reference.
         Surface(
-            color = SoftYellow,
+            color = Lime400,
             shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
             shadowElevation = 8.dp,
             modifier = Modifier.fillMaxWidth(),
@@ -213,32 +218,32 @@ fun OcrReadyScreen(
                     EditTool(
                         icon = Icons.Outlined.AutoFixHigh,
                         label = "Auto",
-                        enabled = pageReady,
-                        onClick = onCrop,
+                        enabled = pageReady && toolsEnabled,
+                        onClick = onAutoEnhance,
                     )
                     EditTool(
                         icon = Icons.Outlined.Crop,
                         label = "Crop",
-                        enabled = pageReady,
+                        enabled = pageReady && toolsEnabled,
                         onClick = onCrop,
                     )
                     EditTool(
                         icon = Icons.Outlined.Rotate90DegreesCcw,
                         label = "Rotate",
-                        enabled = pageReady,
+                        enabled = pageReady && toolsEnabled,
                         onClick = onRotate,
                     )
                     EditTool(
                         icon = Icons.Outlined.DocumentScanner,
                         label = "Rescan",
-                        enabled = true,
+                        enabled = toolsEnabled,
                         onClick = onRetake,
                     )
                     if (fromLibrary) {
                         EditTool(
                             icon = Icons.Outlined.DeleteOutline,
                             label = "Delete",
-                            enabled = true,
+                            enabled = toolsEnabled,
                             onClick = { pendingDelete = true },
                         )
                     }
@@ -256,7 +261,7 @@ fun OcrReadyScreen(
                     Text(
                         text = "Cancel",
                         style = MaterialTheme.typography.titleMedium,
-                        color = DeepRichRed.copy(alpha = 0.75f),
+                        color = Ink.copy(alpha = 0.75f),
                         modifier = Modifier
                             .clip(RoundedCornerShape(8.dp))
                             .clickable(onClick = onBack)
@@ -268,7 +273,7 @@ fun OcrReadyScreen(
                         style = MaterialTheme.typography.titleMedium.copy(
                             fontWeight = FontWeight.Bold,
                         ),
-                        color = DeepRichRed,
+                        color = Ink,
                         modifier = Modifier
                             .clip(RoundedCornerShape(8.dp))
                             .clickable(onClick = onDone)
@@ -293,7 +298,7 @@ fun OcrReadyScreen(
                         onDelete(libraryScanId)
                     },
                 ) {
-                    Text("Delete", color = DeepRichRed)
+                    Text("Delete", color = Ink)
                 }
             },
             dismissButton = {
@@ -312,27 +317,29 @@ private fun EditTool(
     enabled: Boolean,
     onClick: () -> Unit,
 ) {
-    val tint = if (enabled) DeepRichRed else DeepRichRed.copy(alpha = 0.35f)
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
+    val tint = if (enabled) Ink else Ink.copy(alpha = 0.35f)
+    TextButton(
+        onClick = onClick,
+        enabled = enabled,
         modifier = Modifier
-            .clip(RoundedCornerShape(12.dp))
-            .clickable(enabled = enabled, onClick = onClick)
-            .padding(horizontal = 8.dp, vertical = 6.dp)
+            .widthIn(min = 64.dp)
             .semantics { contentDescription = label },
+        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = tint,
-            modifier = Modifier.size(28.dp),
-        )
-        Spacer(modifier = Modifier.height(8.dp))
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelMedium,
-            color = tint,
-        )
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = tint,
+                modifier = Modifier.size(28.dp),
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelMedium,
+                color = tint,
+            )
+        }
     }
 }
 
@@ -374,7 +381,7 @@ private fun GalleryPageContent(
             Text(
                 "Loading…",
                 style = MaterialTheme.typography.bodyLarge,
-                color = SoftYellow.copy(alpha = 0.7f),
+                color = Lime400.copy(alpha = 0.7f),
             )
         }
     }

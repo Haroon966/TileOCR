@@ -31,7 +31,27 @@ class OpenCvFrameNormalizer(
     override suspend fun normalizeForStitch(frame: CaptureFrame): CaptureFrame =
         withContext(Dispatchers.Default) {
             val path = pathOf(frame.uri) ?: return@withContext frame
-            val bitmap = decodeWithExif(path) ?: return@withContext frame
+            var bitmap = decodeWithExif(path) ?: return@withContext frame
+            // EXIF first; if missing, apply CameraX Surface.ROTATION_* (or degrees).
+            val exifOrient = runCatching {
+                ExifInterface(path).getAttributeInt(
+                    ExifInterface.TAG_ORIENTATION,
+                    ExifInterface.ORIENTATION_NORMAL,
+                )
+            }.getOrDefault(ExifInterface.ORIENTATION_NORMAL)
+            val exifApplied = exifOrient != ExifInterface.ORIENTATION_NORMAL &&
+                exifOrient != ExifInterface.ORIENTATION_UNDEFINED
+            if (!exifApplied) {
+                val rot = OrientationMath.displayRotationToDegrees(frame.displayRotation)
+                if (rot != 0) {
+                    val matrix = Matrix().apply { postRotate(rot.toFloat()) }
+                    val turned = Bitmap.createBitmap(
+                        bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true,
+                    )
+                    if (turned != bitmap) bitmap.recycle()
+                    bitmap = turned
+                }
+            }
             val w = bitmap.width
             val h = bitmap.height
             val outFile = File(path).parentFile?.resolve("norm_${frame.index}.jpg")
@@ -42,6 +62,7 @@ class OpenCvFrameNormalizer(
                 uri = Uri.fromFile(outFile),
                 width = w,
                 height = h,
+                displayRotation = 0,
                 exifOrientation = ExifInterface.ORIENTATION_NORMAL,
             )
         }

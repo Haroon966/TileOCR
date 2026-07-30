@@ -23,8 +23,8 @@ import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
-import com.paperpanorama.ocr.ui.theme.DeepRichRed
-import com.paperpanorama.ocr.ui.theme.SoftYellow
+import com.paperpanorama.ocr.ui.theme.Ink
+import com.paperpanorama.ocr.ui.theme.Lime400
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -61,8 +61,8 @@ fun StitchFailureSheet(
                         .height(52.dp),
                     shape = RoundedCornerShape(8.dp),
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = DeepRichRed,
-                        contentColor = SoftYellow,
+                        containerColor = Lime400,
+                        contentColor = Ink,
                     ),
                 ) {
                     Text("Use best frame")

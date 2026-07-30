@@ -3,11 +3,13 @@ package com.paperpanorama.ocr.camera
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import com.paperpanorama.ocr.capture.PageEdgeClassifier
+import com.paperpanorama.ocr.capture.PageSpaceTracker
+import com.paperpanorama.ocr.domain.CoverageSnapshot
 import com.paperpanorama.ocr.domain.LivePageHint
 import com.paperpanorama.ocr.domain.NormPoint
-import com.paperpanorama.ocr.domain.NormQuad
 import com.paperpanorama.ocr.doc.PaperMask
 import com.paperpanorama.ocr.stitch.OpenCvBootstrap
+import org.opencv.core.Core
 import org.opencv.core.CvType
 import org.opencv.core.Mat
 import org.opencv.core.MatOfKeyPoint
@@ -15,11 +17,12 @@ import org.opencv.features2d.ORB
 import org.opencv.imgproc.Imgproc
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.max
 import kotlin.math.min
 
 /**
- * Live paper detection + 2×2 AR tile quads + focus/alignment for the active tile.
+ * Live paper detection + persistent 8×12 grid via [PageSpaceTracker].
  */
 class LivePageAnalyzer(
     private val onHint: (LivePageHint) -> Unit,
@@ -28,124 +31,47 @@ class LivePageAnalyzer(
     private val lastAnalysisMs = AtomicLong(0)
     private val recentIous = ArrayDeque<Float>(IOU_WINDOW)
     private var lastRect: FloatArray? = null
-    private val activeTile = AtomicInteger(0)
+    private val targetCell = AtomicInteger(0)
+    private val trackerRef = AtomicReference<PageSpaceTracker?>(null)
+    private val alignStreak = AtomicInteger(0)
+    private var lastGoodHint: LivePageHint = LivePageHint.Idle
 
-    fun setActiveTile(index: Int) {
-        activeTile.set(index.coerceIn(0, 3))
+    fun setPageSpaceTracker(tracker: PageSpaceTracker?) {
+        trackerRef.set(tracker)
     }
 
-    @androidx.camera.core.ExperimentalGetImage
+    fun setActiveTile(index: Int) {
+        targetCell.set(index.coerceAtLeast(0))
+    }
+
+    fun setPageMapped(mapped: Boolean) {
+        // Seed lock is owned by tracker; mapped flag is inferred from tracker.isLocked.
+    }
+
     override fun analyze(image: ImageProxy) {
         try {
             val now = System.currentTimeMillis()
             if (now - lastAnalysisMs.get() < MIN_INTERVAL_MS) return
             lastAnalysisMs.set(now)
             if (!OpenCvBootstrap.ensureInitialized()) {
-                onHint(LivePageHint.Idle)
+                onHint(LivePageHint.Idle.copy(hint = "Vision engine loading…", featuresOk = false))
                 return
             }
-            val w = image.width
-            val h = image.height
-            if (w < 16 || h < 16) return
+            if (image.width < 16 || image.height < 16) return
 
+            val rotation = image.imageInfo.rotationDegrees
             val gray = yPlaneToGrayMat(image) ?: return
             try {
-                val small = downscaleGray(gray, WORK_EDGE)
+                val oriented = rotateGray(gray, rotation)
                 try {
-                    val bgr = Mat()
-                    Imgproc.cvtColor(small, bgr, Imgproc.COLOR_GRAY2BGR)
-                    val blob = try {
-                        PaperMask.paperBlob(bgr)
-                    } catch (_: Throwable) {
-                        null
+                    val small = downscaleGray(oriented, WORK_EDGE)
+                    try {
+                        processFrame(small)
+                    } finally {
+                        if (small !== oriented) small.release()
                     }
-                    bgr.release()
-                    val features = countOrb(small)
-
-                    if (blob == null) {
-                        recentIous.clear()
-                        lastRect = null
-                        onHint(
-                            LivePageHint(
-                                featureCount = features,
-                                featuresOk = features >= LivePageHint.MIN_FEATURES,
-                                hint = "Can't see paper — change background or lighting",
-                            ),
-                        )
-                        return
-                    }
-
-                    val rect = Imgproc.boundingRect(blob)
-                    blob.release()
-                    val sw = small.cols().toFloat()
-                    val sh = small.rows().toFloat()
-                    val paper = PageEdgeClassifier.fromBoundingBox(rect.x, rect.y, rect.width, rect.height)
-                    val flags = PageEdgeClassifier.classify(paper, small.cols(), small.rows())
-                    val longVert = PageEdgeClassifier.isLongAxisVertical(paper)
-                    val pullBack = paper.area > 0.92f * sw * sh
-
-                    val nl = rect.x / sw
-                    val nt = rect.y / sh
-                    val nr = (rect.x + rect.width) / sw
-                    val nb = (rect.y + rect.height) / sh
-                    val iou = lastRect?.let { iouNorm(it, floatArrayOf(nl, nt, nr, nb)) } ?: 0f
-                    lastRect = floatArrayOf(nl, nt, nr, nb)
-                    if (recentIous.size >= IOU_WINDOW) recentIous.removeFirst()
-                    recentIous.addLast(iou)
-                    val stable = recentIous.size >= IOU_WINDOW && recentIous.all { it >= IOU_STABLE }
-
-                    val paperQuad = listOf(
-                        NormPoint(nl, nt),
-                        NormPoint(nr, nt),
-                        NormPoint(nr, nb),
-                        NormPoint(nl, nb),
-                    )
-                    val tileQuads = splitPaperToTiles(nl, nt, nr, nb)
-                    val focused = focusedTile(tileQuads)
-                    val want = activeTile.get()
-                    val aligned = isAligned(tileQuads.getOrNull(want), want)
-
-                    val featuresOk = features >= LivePageHint.MIN_FEATURES
-                    val hint = when {
-                        pullBack && goodLookingWhole(flags, longVert) ->
-                            null
-                        pullBack ->
-                            "Pull back — show the whole page with 4 tiles"
-                        !flags.topInterior && longVert ->
-                            "Top cut off — show full page edges"
-                        !flags.bottomInterior && longVert ->
-                            "Bottom cut off — show full page edges"
-                        !featuresOk ->
-                            "Include more text / texture"
-                        !stable ->
-                            "Hold steady…"
-                        want != focused && focused >= 0 ->
-                            "Move to the highlighted tile"
-                        aligned ->
-                            "Hold still — capturing tile ${want + 1}"
-                        else ->
-                            "Move closer to the highlighted tile"
-                    }
-
-                    onHint(
-                        LivePageHint(
-                            paperQuad = paperQuad,
-                            tileQuads = tileQuads,
-                            cutOffTop = !flags.topInterior,
-                            cutOffBottom = !flags.bottomInterior,
-                            cutOffLeft = !flags.leftInterior,
-                            cutOffRight = !flags.rightInterior,
-                            pullBack = pullBack && !aligned,
-                            iouStable = stable,
-                            featureCount = features,
-                            featuresOk = featuresOk,
-                            hint = hint,
-                            focusedTileIndex = focused,
-                            activeTileAligned = aligned && stable,
-                        ),
-                    )
                 } finally {
-                    if (small !== gray) small.release()
+                    if (oriented !== gray) oriented.release()
                 }
             } finally {
                 gray.release()
@@ -155,57 +81,160 @@ class LivePageAnalyzer(
         }
     }
 
-    private fun goodLookingWhole(
-        flags: PageEdgeClassifier.EdgeFlags,
-        longVert: Boolean,
-    ): Boolean = flags.longAxisEndsInterior(longVert)
+    private fun processFrame(small: Mat) {
+        val tracker = trackerRef.get()
+        val features = countOrb(small)
 
-    private fun splitPaperToTiles(l: Float, t: Float, r: Float, b: Float): List<NormQuad> {
-        val mx = (l + r) / 2f
-        val my = (t + b) / 2f
-        // TL, TR, BL, BR
-        return listOf(
-            NormQuad(NormPoint(l, t), NormPoint(mx, t), NormPoint(mx, my), NormPoint(l, my)),
-            NormQuad(NormPoint(mx, t), NormPoint(r, t), NormPoint(r, my), NormPoint(mx, my)),
-            NormQuad(NormPoint(l, my), NormPoint(mx, my), NormPoint(mx, b), NormPoint(l, b)),
-            NormQuad(NormPoint(mx, my), NormPoint(r, my), NormPoint(r, b), NormPoint(mx, b)),
+        // Phase B: tracker already locked — track grid, do not re-split AABB.
+        if (tracker != null && tracker.isLocked) {
+            val track = tracker.track(small, targetCell.get())
+            val stable = pushIouFromPaper(track.paperQuad)
+            if (track.targetAligned && track.ok && stable) {
+                alignStreak.incrementAndGet()
+            } else {
+                alignStreak.set(0)
+            }
+            val aligned = alignStreak.get() >= ALIGN_STREAK
+            val featuresOk = features >= LivePageHint.MIN_FEATURES
+            val hint = when {
+                track.ok.not() -> "Hold steady — keep textured page in view"
+                !featuresOk -> "Include more text / texture"
+                !stable -> "Hold steady…"
+                aligned -> "Hold still — capturing sharp tile"
+                else -> "Move closer to the red / missing region"
+            }
+            val out = LivePageHint(
+                paperQuad = track.paperQuad,
+                tileQuads = track.cellQuads,
+                gridCols = CoverageSnapshot.GRID_COLS,
+                gridRows = CoverageSnapshot.GRID_ROWS,
+                pullBack = false,
+                iouStable = stable,
+                featureCount = features,
+                featuresOk = featuresOk,
+                hint = hint,
+                focusedTileIndex = track.focusedCellIndex,
+                activeTileAligned = aligned && track.ok,
+                pageMapped = true,
+                trackingLost = !track.ok,
+            )
+            if (track.ok) lastGoodHint = out
+            onHint(if (track.ok) out else lastGoodHint.copy(trackingLost = true, hint = hint, featureCount = features))
+            return
+        }
+
+        // Phase A: find whole page and lock seed.
+        val bgr = Mat()
+        Imgproc.cvtColor(small, bgr, Imgproc.COLOR_GRAY2BGR)
+        val blob = try {
+            PaperMask.paperBlob(bgr)
+        } catch (_: Throwable) {
+            null
+        }
+        bgr.release()
+
+        if (blob == null) {
+            recentIous.clear()
+            lastRect = null
+            alignStreak.set(0)
+            onHint(
+                LivePageHint(
+                    featureCount = features,
+                    featuresOk = false,
+                    hint = "Can't see paper — change background or lighting",
+                ),
+            )
+            return
+        }
+
+        val rect = Imgproc.boundingRect(blob)
+        blob.release()
+        val sw = small.cols().toFloat()
+        val sh = small.rows().toFloat()
+        val paper = PageEdgeClassifier.fromBoundingBox(rect.x, rect.y, rect.width, rect.height)
+        val flags = PageEdgeClassifier.classify(paper, small.cols(), small.rows())
+        val longVert = PageEdgeClassifier.isLongAxisVertical(paper)
+        val paperFrac = paper.area / (sw * sh)
+        val wholePageOk = flags.longAxisEndsInterior(longVert) &&
+            !flags.fillsFrame(longVert) &&
+            paperFrac in 0.28f..0.90f
+
+        val nl = rect.x / sw
+        val nt = rect.y / sh
+        val nr = (rect.x + rect.width) / sw
+        val nb = (rect.y + rect.height) / sh
+        val iou = lastRect?.let { iouNorm(it, floatArrayOf(nl, nt, nr, nb)) } ?: 0f
+        lastRect = floatArrayOf(nl, nt, nr, nb)
+        if (recentIous.size >= IOU_WINDOW) recentIous.removeFirst()
+        recentIous.addLast(iou)
+        val stable = recentIous.size >= IOU_WINDOW && recentIous.all { it >= IOU_STABLE }
+
+        val paperQuad = listOf(
+            NormPoint(nl, nt),
+            NormPoint(nr, nt),
+            NormPoint(nr, nb),
+            NormPoint(nl, nb),
+        )
+
+        val pullBack = flags.fillsFrame(longVert) || paperFrac > 0.92f || paperFrac < 0.22f
+
+        if (wholePageOk && stable && tracker != null && !tracker.isLocked) {
+            tracker.lockSeed(
+                small,
+                rect.x.toFloat(),
+                rect.y.toFloat(),
+                (rect.x + rect.width).toFloat(),
+                (rect.y + rect.height).toFloat(),
+            )
+        }
+
+        val featuresOk = features >= LivePageHint.MIN_FEATURES
+        val hint = when {
+            pullBack -> "Pull back — show the whole page with margins"
+            !wholePageOk -> "Frame the whole page so the 8×12 grid can lock on"
+            !stable -> "Hold steady to lock the page grid…"
+            tracker?.isLocked == true -> "Page mapped — move closer to a red cell"
+            else -> "Hold steady to lock the page grid…"
+        }
+
+        val mapped = tracker?.isLocked == true
+        onHint(
+            LivePageHint(
+                paperQuad = paperQuad,
+                tileQuads = if (mapped) tracker!!.track(small, 0).cellQuads else emptyList(),
+                gridCols = CoverageSnapshot.GRID_COLS,
+                gridRows = CoverageSnapshot.GRID_ROWS,
+                cutOffTop = !flags.topInterior,
+                cutOffBottom = !flags.bottomInterior,
+                cutOffLeft = !flags.leftInterior,
+                cutOffRight = !flags.rightInterior,
+                pullBack = pullBack,
+                iouStable = stable,
+                featureCount = features,
+                featuresOk = featuresOk,
+                hint = hint,
+                focusedTileIndex = -1,
+                activeTileAligned = false,
+                pageMapped = mapped,
+                trackingLost = false,
+            ),
         )
     }
 
-    private fun focusedTile(tiles: List<NormQuad>): Int {
-        // Which tile center is closest to viewfinder center (0.5, 0.5).
-        var best = -1
-        var bestDist = Float.MAX_VALUE
-        tiles.forEachIndexed { i, q ->
-            val c = q.center()
-            val d = (c.x - 0.5f) * (c.x - 0.5f) + (c.y - 0.5f) * (c.y - 0.5f)
-            if (d < bestDist) {
-                bestDist = d
-                best = i
-            }
-        }
-        return best
-    }
-
-    private fun isAligned(quad: NormQuad?, index: Int): Boolean {
-        if (quad == null) return false
-        val c = quad.center()
-        // Desired center offsets so each quadrant is brought toward frame center when zoomed in.
-        val targetX = when (index % 2) {
-            0 -> 0.42f
-            else -> 0.58f
-        }
-        val targetY = when (index / 2) {
-            0 -> 0.42f
-            else -> 0.58f
-        }
-        val nearCenter = kotlin.math.abs(c.x - 0.5f) < 0.22f && kotlin.math.abs(c.y - 0.5f) < 0.22f
-        // Tile should be reasonably large in the frame (user moved closer).
-        val w = kotlin.math.abs(quad.tr.x - quad.tl.x)
-        val h = kotlin.math.abs(quad.bl.y - quad.tl.y)
-        val largeEnough = w > 0.28f && h > 0.22f
-        val toward = kotlin.math.abs(c.x - targetX) < 0.28f && kotlin.math.abs(c.y - targetY) < 0.28f
-        return largeEnough && (nearCenter || toward)
+    private fun pushIouFromPaper(paperQuad: List<NormPoint>): Boolean {
+        if (paperQuad.size < 4) return false
+        val xs = paperQuad.map { it.x }
+        val ys = paperQuad.map { it.y }
+        val nl = xs.minOrNull() ?: return false
+        val nr = xs.maxOrNull() ?: return false
+        val nt = ys.minOrNull() ?: return false
+        val nb = ys.maxOrNull() ?: return false
+        val cur = floatArrayOf(nl, nt, nr, nb)
+        val iou = lastRect?.let { iouNorm(it, cur) } ?: 0f
+        lastRect = cur
+        if (recentIous.size >= IOU_WINDOW) recentIous.removeFirst()
+        recentIous.addLast(iou)
+        return recentIous.size >= IOU_WINDOW && recentIous.all { it >= IOU_STABLE }
     }
 
     private fun countOrb(gray: Mat): Int {
@@ -218,6 +247,19 @@ class LivePageAnalyzer(
         } finally {
             kp.release()
         }
+    }
+
+    private fun rotateGray(src: Mat, degrees: Int): Mat {
+        val d = ((degrees % 360) + 360) % 360
+        if (d == 0) return src
+        val dst = Mat()
+        when (d) {
+            90 -> Core.rotate(src, dst, Core.ROTATE_90_CLOCKWISE)
+            180 -> Core.rotate(src, dst, Core.ROTATE_180)
+            270 -> Core.rotate(src, dst, Core.ROTATE_90_COUNTERCLOCKWISE)
+            else -> return src
+        }
+        return dst
     }
 
     private fun downscaleGray(src: Mat, longEdge: Int): Mat {
@@ -283,5 +325,6 @@ class LivePageAnalyzer(
         private const val WORK_EDGE = 480
         private const val IOU_WINDOW = 3
         private const val IOU_STABLE = 0.85f
+        private const val ALIGN_STREAK = 2
     }
 }

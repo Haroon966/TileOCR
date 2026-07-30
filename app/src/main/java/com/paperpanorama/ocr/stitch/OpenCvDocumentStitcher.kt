@@ -57,6 +57,73 @@ class OpenCvDocumentStitcher(
     private val matchLongEdge: Int = 1400,
 ) : DocumentStitcher {
 
+    /**
+     * Combine already-cropped document pages (ML Kit Document Scanner output).
+     * Does **not** geometric-panorama stitch — those pages are independent sheets
+     * (or non-overlapping regions), so we stack them into one OCR-ready image.
+     */
+    suspend fun combineDocumentPages(
+        frames: List<CaptureFrame>,
+        onProgress: (Float, String) -> Unit,
+        isCancelled: () -> Boolean,
+    ): StitchResult = withContext(Dispatchers.Default) {
+        if (!OpenCvBootstrap.ensureInitialized()) {
+            return@withContext StitchResult.Failed("OpenCV failed to load", frames.firstOrNull()?.uri)
+        }
+        if (frames.isEmpty()) {
+            return@withContext StitchResult.Failed("No frames", null)
+        }
+        if (frames.size == 1) {
+            onProgress(0.5f, "Uprighting…")
+            val upright = runCatching { normalizer.autoUprightAndDeskew(frames[0].uri) }
+                .getOrDefault(frames[0].uri)
+            onProgress(1f, "Done")
+            return@withContext StitchResult.Ok(upright)
+        }
+
+        val mats = ArrayList<Mat>(frames.size)
+        try {
+            val total = frames.size
+            for ((i, frame) in frames.withIndex()) {
+                coroutineContext.ensureActive()
+                if (isCancelled()) {
+                    mats.forEach { it.release() }
+                    return@withContext StitchResult.Failed("Cancelled", frames.firstOrNull()?.uri)
+                }
+                onProgress(0.1f + 0.5f * i / total, "Cropping page ${i + 1} of $total…")
+                // Crop paper per page before stacking (lighting/perspective cleaned).
+                val mat = loadMat(frame.uri) ?: loadMatRaw(frame.uri) ?: continue
+                mats.add(mat)
+            }
+            if (mats.isEmpty()) {
+                return@withContext failWithBest(frames, "Could not read scanned pages")
+            }
+            onProgress(0.7f, "Combining ${mats.size} pages…")
+            val stacked = stackPages(mats) ?: run {
+                mats.forEach { it.release() }
+                return@withContext failWithBest(frames, "Could not combine pages")
+            }
+            mats.forEach { it.release() }
+            // Already document-cropped — skip deskew that warps tall stacks.
+            onProgress(0.9f, "Saving…")
+            val sessionDir = File(context.cacheDir, "stitch").also { it.mkdirs() }
+            val outFile = File(sessionDir, "pages_stack_${System.currentTimeMillis()}.jpg")
+            if (!saveMatJpeg(stacked, outFile)) {
+                stacked.release()
+                return@withContext failWithBest(frames, "Could not save combined pages")
+            }
+            stacked.release()
+            onProgress(1f, "Done")
+            StitchResult.Ok(Uri.fromFile(outFile), usedFallback = true)
+        } catch (e: Throwable) {
+            mats.forEach { it.release() }
+            if (isCancelled() || e is kotlinx.coroutines.CancellationException) {
+                return@withContext StitchResult.Failed("Cancelled", frames.firstOrNull()?.uri)
+            }
+            failWithBest(frames, e.message ?: "Combine failed")
+        }
+    }
+
     override suspend fun stitch(
         frames: List<CaptureFrame>,
         onProgress: (Float, String) -> Unit,
@@ -86,7 +153,7 @@ class OpenCvDocumentStitcher(
             transforms.fill(null)
         }
         try {
-            // 1. Per-shot edge processing + features, once per tile.
+            // 1. Per-shot paper crop + features (always crop — never skip for “same page”).
             val total = frames.size
             for (i in frames.indices) {
                 coroutineContext.ensureActive()
@@ -94,8 +161,8 @@ class OpenCvDocumentStitcher(
                     releaseAllState()
                     return@withContext StitchResult.Failed("Cancelled", frames.firstOrNull()?.uri)
                 }
-                onProgress(0.05f + 0.45f * i / total, "Processing photo ${i + 1} of $total…")
-                val tile = loadMat(frames[i].uri) ?: continue
+                onProgress(0.05f + 0.45f * i / total, "Cropping photo ${i + 1} of $total…")
+                val tile = loadMat(frames[i].uri) ?: loadMatRaw(frames[i].uri) ?: continue
                 val feats = detectFeats(tile)
                 if (feats == null) {
                     tile.release()
@@ -104,72 +171,100 @@ class OpenCvDocumentStitcher(
                 entries[i] = TileEntry(tile, feats)
             }
 
-            // 2. Chain: register each tile against the most recently placed one,
-            // falling back to earlier placed tiles when consecutive shots skip.
-            val placed = mutableListOf<Int>()
-            for (i in frames.indices) {
-                val entry = entries[i] ?: continue
+            // 2. Grow connected components (overlap clusters), then stitch each → stack.
+            onProgress(0.5f, "Aligning photos…")
+            val components = growComponents(entries, transforms, frames.size) {
                 coroutineContext.ensureActive()
-                if (isCancelled()) {
+                if (isCancelled()) throw kotlinx.coroutines.CancellationException("Cancelled")
+            }
+            val samePage = looksLikeSamePageTiles(frames)
+            val mosaics = ArrayList<Mat>()
+            var droppedTiles = 0
+            try {
+                for ((ci, group) in components.withIndex()) {
+                    if (group.isEmpty()) continue
+                    onProgress(0.55f + 0.15f * ci / components.size.coerceAtLeast(1), "Compositing group ${ci + 1}…")
+                    if (group.size == 1) {
+                        if (samePage && components.size > 1) {
+                            // Overlapping close-ups that failed match — skip duplicate singles.
+                            droppedTiles++
+                            continue
+                        }
+                        mosaics.add(entries[group[0]]!!.mat.clone())
+                        continue
+                    }
+                    val refMat = entries[group.first()]!!.mat
+                    var piece = composite(group.map { entries[it]!!.mat to transforms[it]!! })
+                    if (piece != null && !isSensibleMosaic(piece, refMat)) {
+                        android.util.Log.i(TIMING_TAG, "component $ci mosaic failed sanity")
+                        piece.release()
+                        piece = null
+                    }
+                    if (piece != null) {
+                        mosaics.add(piece)
+                    } else {
+                        droppedTiles += group.size - 1
+                        mosaics.add(refMat.clone())
+                    }
+                }
+
+                // Unmatched tiles (no features / no component) — stack only if not same-page dupes.
+                val inComponent = components.flatten().toSet()
+                if (!samePage) {
+                    for (i in frames.indices) {
+                        if (entries[i] != null && i !in inComponent) {
+                            mosaics.add(entries[i]!!.mat.clone())
+                            droppedTiles++
+                        }
+                    }
+                } else {
+                    droppedTiles += frames.indices.count { entries[it] != null && it !in inComponent }
+                }
+
+                if (mosaics.isEmpty()) {
                     releaseAllState()
-                    return@withContext StitchResult.Failed("Cancelled", frames.firstOrNull()?.uri)
+                    if (samePage) {
+                        onProgress(0.9f, "Could not align tiles — using sharpest shot…")
+                        val best = pickSharpest(frames)
+                            ?: return@withContext StitchResult.Failed("No frames", null)
+                        val upright = runCatching { normalizer.autoUprightAndDeskew(best) }
+                            .getOrDefault(best)
+                        onProgress(1f, "Done")
+                        return@withContext StitchResult.Ok(upright, usedFallback = true)
+                    }
+                    onProgress(0.72f, "Combining cropped pages…")
+                    val mats = frames.mapNotNull { loadMat(it.uri) ?: loadMatRaw(it.uri) }
+                    val stacked = stackPages(mats)
+                    mats.forEach { it.release() }
+                    if (stacked == null) {
+                        return@withContext failWithBest(
+                            frames,
+                            "Not enough overlap between photos — try again with ~40% overlap",
+                        )
+                    }
+                    return@withContext finishMosaic(
+                        stacked, frames, droppedTiles = frames.size - 1, onProgress,
+                    )
                 }
-                if (placed.isEmpty()) {
-                    transforms[i] = Mat.eye(3, 3, CvType.CV_64F)
-                    placed.add(i)
-                    continue
-                }
-                onProgress(0.5f + 0.2f * placed.size / total, "Aligning photo ${i + 1} of $total…")
-                for (j in placed.asReversed()) {
-                    val h = pairHomography(entries[j]!!, entry) ?: continue
-                    val composed = Mat()
-                    Core.gemm(transforms[j]!!, h, 1.0, Mat(), 0.0, composed)
-                    h.release()
-                    transforms[i] = composed
-                    placed.add(i)
-                    break
-                }
-                if (transforms[i] == null) {
-                    android.util.Log.i(TIMING_TAG, "tile $i dropped: no anchor matched")
-                }
-            }
 
-            if (placed.size <= 1) {
+                onProgress(0.72f, "Building final page…")
+                val combined = if (mosaics.size == 1) {
+                    mosaics[0]
+                } else {
+                    val stacked = stackPages(mosaics)
+                    mosaics.forEach { it.release() }
+                    if (stacked == null) {
+                        releaseAllState()
+                        return@withContext failWithBest(frames, "Stitch produced empty mosaic")
+                    }
+                    stacked
+                }
                 releaseAllState()
-                return@withContext failWithBest(
-                    frames,
-                    "Not enough overlap between photos — try again with ~40% overlap",
-                )
+                finishMosaic(combined, frames, droppedTiles, onProgress)
+            } catch (e: Throwable) {
+                mosaics.forEach { it.release() }
+                throw e
             }
-            val droppedTiles = frames.indices.count { entries[it] != null && transforms[it] == null }
-
-            // 3. Composite all placed tiles into one canvas.
-            onProgress(0.72f, "Compositing…")
-            val composite = composite(placed.map { entries[it]!!.mat to transforms[it]!! })
-            releaseAllState()
-            if (composite == null) {
-                return@withContext failWithBest(frames, "Stitch produced empty mosaic")
-            }
-
-            var resultMat = cropToContent(composite)
-            resultMat = ensureMaxLongEdge(resultMat, MAX_MOSAIC_LONG_EDGE).also {
-                if (it !== resultMat) resultMat.release()
-            }
-            onProgress(0.85f, "Saving mosaic…")
-            val sessionDir = File(context.cacheDir, "stitch").also { it.mkdirs() }
-            val rawFile = File(sessionDir, "mosaic_raw_${System.currentTimeMillis()}.jpg")
-            if (!saveMatJpeg(resultMat, rawFile)) {
-                resultMat.release()
-                return@withContext failWithBest(frames, "Could not save mosaic (out of memory)")
-            }
-            resultMat.release()
-
-            onProgress(0.92f, "Auto-upright…")
-            val upright = runCatching {
-                normalizer.autoUprightAndDeskew(Uri.fromFile(rawFile))
-            }.getOrDefault(Uri.fromFile(rawFile))
-            onProgress(1f, "Done")
-            StitchResult.Ok(upright, usedFallback = droppedTiles > 0)
         } catch (e: Throwable) {
             releaseAllState()
             if (isCancelled() || e is kotlinx.coroutines.CancellationException) {
@@ -177,6 +272,131 @@ class OpenCvDocumentStitcher(
             }
             failWithBest(frames, e.message ?: "Stitch failed")
         }
+    }
+
+    private suspend fun finishMosaic(
+        resultMatIn: Mat,
+        frames: List<CaptureFrame>,
+        droppedTiles: Int,
+        onProgress: (Float, String) -> Unit,
+    ): StitchResult {
+        var resultMat = cropToContent(resultMatIn)
+        resultMat = ensureMaxLongEdge(resultMat, MAX_MOSAIC_LONG_EDGE).also {
+            if (it !== resultMat) resultMat.release()
+        }
+        onProgress(0.85f, "Global polish — exposure / upright…")
+        val sessionDir = File(context.cacheDir, "stitch").also { it.mkdirs() }
+        val rawFile = File(sessionDir, "mosaic_raw_${System.currentTimeMillis()}.jpg")
+        if (!saveMatJpeg(resultMat, rawFile)) {
+            resultMat.release()
+            return failWithBest(frames, "Could not save mosaic (out of memory)")
+        }
+        resultMat.release()
+
+        onProgress(0.92f, "Auto-upright polish…")
+        val upright = runCatching {
+            normalizer.autoUprightAndDeskew(Uri.fromFile(rawFile))
+        }.getOrDefault(Uri.fromFile(rawFile))
+        onProgress(1f, "Done")
+        return StitchResult.Ok(upright, usedFallback = droppedTiles > 0)
+    }
+
+    /**
+     * Grow overlap clusters: first seed chain in capture order, then new components
+     * from remaining unmatched tiles (handles non-overlapping regions / multi-sheet).
+     */
+    private fun growComponents(
+        entries: Array<TileEntry?>,
+        transforms: Array<Mat?>,
+        frameCount: Int,
+        checkCancel: () -> Unit,
+    ): List<List<Int>> {
+        val components = ArrayList<List<Int>>()
+        val claimed = BooleanArray(frameCount)
+
+        fun growFromSeed(seed: Int): List<Int> {
+            transforms[seed]?.release()
+            transforms[seed] = Mat.eye(3, 3, CvType.CV_64F)
+            claimed[seed] = true
+            val group = mutableListOf(seed)
+            var progressed = true
+            while (progressed) {
+                progressed = false
+                checkCancel()
+                for (i in 0 until frameCount) {
+                    if (claimed[i] || entries[i] == null) continue
+                    val match = bestAnchorMatch(entries[i]!!, group, entries, transforms) ?: continue
+                    transforms[i]?.release()
+                    transforms[i] = match
+                    claimed[i] = true
+                    group.add(i)
+                    progressed = true
+                    android.util.Log.i(TIMING_TAG, "tile $i joined component seed=$seed")
+                }
+            }
+            return group
+        }
+
+        // Primary component: walk capture order (same as old chain).
+        val first = (0 until frameCount).firstOrNull { entries[it] != null }
+        if (first != null) {
+            components.add(growFromSeed(first))
+            // Orphan retry into primary (order-independent overlaps).
+            var progressed = true
+            while (progressed) {
+                progressed = false
+                checkCancel()
+                val primary = components[0].toMutableList()
+                for (i in 0 until frameCount) {
+                    if (claimed[i] || entries[i] == null) continue
+                    val match = bestAnchorMatch(entries[i]!!, primary, entries, transforms) ?: continue
+                    transforms[i]?.release()
+                    transforms[i] = match
+                    claimed[i] = true
+                    primary.add(i)
+                    progressed = true
+                    android.util.Log.i(TIMING_TAG, "tile $i recovered into primary")
+                }
+                components[0] = primary
+            }
+        }
+
+        // Extra components for remaining unmatched tiles.
+        while (true) {
+            val seed = (0 until frameCount).firstOrNull { !claimed[it] && entries[it] != null } ?: break
+            components.add(growFromSeed(seed))
+        }
+        return components
+    }
+
+    /**
+     * Pick the anchor with the strongest transform (most inliers), not merely the
+     * first neighbor that passes — ML Kit page order is capture order, not spatial.
+     */
+    private fun bestAnchorMatch(
+        entry: TileEntry,
+        placed: List<Int>,
+        entries: Array<TileEntry?>,
+        transforms: Array<Mat?>,
+    ): Mat? {
+        val recentFirst = placed.asReversed().take(NEIGHBOR_WINDOW)
+        val older = placed.asReversed().drop(NEIGHBOR_WINDOW)
+        var bestH: Mat? = null
+        var bestScore = -1
+        for (j in recentFirst + older) {
+            val scored = pairHomographyScored(entries[j]!!, entry) ?: continue
+            if (scored.inliers > bestScore) {
+                bestH?.release()
+                bestScore = scored.inliers
+                val composed = Mat()
+                Core.gemm(transforms[j]!!, scored.h, 1.0, Mat(), 0.0, composed)
+                scored.h.release()
+                bestH = composed
+            } else {
+                scored.h.release()
+            }
+        }
+        return bestH
     }
 
     private suspend fun failWithBest(frames: List<CaptureFrame>, reason: String): StitchResult {
@@ -210,13 +430,26 @@ class OpenCvDocumentStitcher(
 
     private fun detectFeats(src: Mat): Feats? {
         val t = android.os.SystemClock.elapsedRealtime()
-        val small = downscale(src, matchLongEdge)
+        val smallColor = downscale(src, matchLongEdge)
+        val gray = Mat()
+        if (smallColor.channels() > 1) {
+            Imgproc.cvtColor(smallColor, gray, Imgproc.COLOR_BGR2GRAY)
+        } else {
+            smallColor.copyTo(gray)
+        }
+        val smallCols = gray.cols()
+        val smallRows = gray.rows()
+        if (smallColor !== src) smallColor.release()
+        // CLAHE — ML Kit cleaned pages are flat white; boost ink for SIFT/ORB.
+        val enhanced = Mat()
+        Imgproc.createCLAHE(3.0, Size(8.0, 8.0)).apply(gray, enhanced)
+        gray.release()
         val detector = createDetector()
         val kp = MatOfKeyPoint()
         val desc = Mat()
-        detector.detectAndCompute(small, Mat(), kp, desc)
-        val feats = Feats(kp, desc, small.cols(), small.rows(), detector is ORB)
-        if (small !== src) small.release()
+        detector.detectAndCompute(enhanced, Mat(), kp, desc)
+        enhanced.release()
+        val feats = Feats(kp, desc, smallCols, smallRows, detector is ORB)
         android.util.Log.i(
             TIMING_TAG,
             "detectFeats ${src.cols()}x${src.rows()} kp=${kp.rows()} " +
@@ -229,11 +462,12 @@ class OpenCvDocumentStitcher(
         return feats
     }
 
+    private data class ScoredH(val h: Mat, val inliers: Int)
+
     /**
-     * Homography mapping [next]'s full-resolution coords into [base]'s.
-     * Null when the pair doesn't share enough trustworthy structure.
+     * Homography (or affine→H) mapping [next]'s full-resolution coords into [base]'s.
      */
-    private fun pairHomography(base: TileEntry, next: TileEntry): Mat? {
+    private fun pairHomographyScored(base: TileEntry, next: TileEntry): ScoredH? {
         val t = android.os.SystemClock.elapsedRealtime()
         try {
             return pairHomographyInner(base, next)
@@ -245,7 +479,7 @@ class OpenCvDocumentStitcher(
         }
     }
 
-    private fun pairHomographyInner(base: TileEntry, next: TileEntry): Mat? {
+    private fun pairHomographyInner(base: TileEntry, next: TileEntry): ScoredH? {
         val baseFeats = base.feats
         val nextFeats = next.feats
         val normType = if (baseFeats.isOrb) Core.NORM_HAMMING else Core.NORM_L2
@@ -253,18 +487,18 @@ class OpenCvDocumentStitcher(
         val knn = mutableListOf<MatOfDMatch>()
         matcher.knnMatch(baseFeats.desc, nextFeats.desc, knn, 2)
         val good = mutableListOf<DMatch>()
-        val ratio = 0.75f
+        val ratio = 0.80f
         for (m in knn) {
             val arr = m.toArray()
             if (arr.size >= 2 && arr[0].distance < ratio * arr[1].distance) {
+                good.add(arr[0])
+            } else if (arr.size == 1) {
                 good.add(arr[0])
             }
             m.release()
         }
         if (good.size < MIN_GOOD_MATCHES) return null
 
-        // Rescale matched points to full-resolution coordinates so the transform
-        // is exact regardless of per-tile downscale factors.
         val baseScaleX = base.mat.cols().toDouble() / baseFeats.smallCols
         val baseScaleY = base.mat.rows().toDouble() / baseFeats.smallRows
         val nextScaleX = next.mat.cols().toDouble() / nextFeats.smallCols
@@ -281,48 +515,74 @@ class OpenCvDocumentStitcher(
         }
         val srcPts = MatOfPoint2f(*pts2.toTypedArray())
         val dstPts = MatOfPoint2f(*pts1.toTypedArray())
-        val inliers = Mat()
-        val ransacThreshold = 3.0 * max(max(baseScaleX, nextScaleX), 1.0)
-        val h = Calib3d.findHomography(
-            srcPts,
-            dstPts,
-            Calib3d.RANSAC,
-            ransacThreshold,
-            inliers,
-            5000,
-            0.995,
-        )
+
+        var h: Mat? = null
+        var inlierCount = 0
+
+        // Prefer homography; fall back to partial affine (ML Kit pages are already flat).
+        run {
+            val inliers = Mat()
+            val ransacThreshold = 4.0 * max(max(baseScaleX, nextScaleX), 1.0)
+            val hh = Calib3d.findHomography(
+                srcPts,
+                dstPts,
+                Calib3d.RANSAC,
+                ransacThreshold,
+                inliers,
+                5000,
+                0.995,
+            )
+            val inl = Core.countNonZero(inliers)
+            inliers.release()
+            if (!hh.empty() && hh.rows() == 3 && inl >= MIN_INLIERS) {
+                h = hh
+                inlierCount = inl
+            } else {
+                hh.release()
+            }
+        }
+        if (h == null) {
+            val inliers = Mat()
+            val aff = Calib3d.estimateAffinePartial2D(
+                srcPts,
+                dstPts,
+                inliers,
+                Calib3d.RANSAC,
+                4.0,
+                3000,
+                0.99,
+                10,
+            )
+            val inl = Core.countNonZero(inliers)
+            inliers.release()
+            if (!aff.empty() && inl >= MIN_INLIERS_AFFINE) {
+                h = affineToHomography(aff)
+                aff.release()
+                inlierCount = inl
+            } else {
+                aff.release()
+            }
+        }
         srcPts.release()
         dstPts.release()
-        val inlierCount = Core.countNonZero(inliers)
-        inliers.release()
-        if (h.empty() || h.rows() != 3) {
-            h.release()
-            return null
-        }
+        val hom = h ?: return null
 
-        // Demand real consensus: a wrong-but-confident transform pastes tiles at
-        // bogus offsets. Fraction floor kept low — textured/crumpled content
-        // inflates good-match counts on genuine merges.
         val inlierFraction = inlierCount.toFloat() / good.size
-        if (inlierCount < MIN_INLIERS || inlierFraction < MIN_INLIER_FRACTION) {
-            h.release()
+        if (inlierCount < MIN_INLIERS_AFFINE || inlierFraction < MIN_INLIER_FRACTION) {
+            hom.release()
             return null
         }
 
-        // Normalize so h22 == 1, then sanity-check the linear part: handheld doc
-        // shots are near-same scale, not mirrored, and rotated near a multiple of
-        // 90° (per-tile auto-upright can disagree by a quarter turn).
-        val h22 = h.get(2, 2)[0]
+        val h22 = hom.get(2, 2)[0]
         if (abs(h22) < 1e-9) {
-            h.release()
+            hom.release()
             return null
         }
-        Core.divide(h, Scalar(h22), h)
-        val h00 = h.get(0, 0)[0]
-        val h01 = h.get(0, 1)[0]
-        val h10 = h.get(1, 0)[0]
-        val h11 = h.get(1, 1)[0]
+        Core.divide(hom, Scalar(h22), hom)
+        val h00 = hom.get(0, 0)[0]
+        val h01 = hom.get(0, 1)[0]
+        val h10 = hom.get(1, 0)[0]
+        val h11 = hom.get(1, 1)[0]
         val det = h00 * h11 - h01 * h10
         val scaleEst = sqrt(abs(det))
         val rotDeg = Math.toDegrees(atan2(h10, h00))
@@ -332,19 +592,39 @@ class OpenCvDocumentStitcher(
             TIMING_TAG,
             "pair good=${good.size} inl=$inlierCount frac=$inlierFraction scale=$scaleEst rot=$rotDeg",
         )
-        if (det <= 0 || scaleEst < 0.5 || scaleEst > 2.0 || distToQuarterTurn > 20.0) {
-            h.release()
+        // ML Kit pages can differ a bit in scale after independent crop/clean.
+        if (det <= 0 || scaleEst < 0.35 || scaleEst > 2.8 || distToQuarterTurn > 35.0) {
+            hom.release()
             return null
         }
+        // Reject near-duplicate alignment (same page re-shot) — causes vertical
+        // mis-stitches when a tiny bogus ty slips through.
+        val tx = hom.get(0, 2)[0]
+        val ty = hom.get(1, 2)[0]
+        val move = hypot(tx, ty)
+        val minMove = 0.12 * min(base.mat.cols(), base.mat.rows())
+        if (move < minMove) {
+            android.util.Log.i(TIMING_TAG, "pair rejected: near-duplicate move=$move < $minMove")
+            hom.release()
+            return null
+        }
+        return ScoredH(hom, inlierCount)
+    }
+
+    private fun affineToHomography(aff2x3: Mat): Mat {
+        val h = Mat.eye(3, 3, CvType.CV_64F)
+        h.put(0, 0, aff2x3.get(0, 0)[0], aff2x3.get(0, 1)[0], aff2x3.get(0, 2)[0])
+        h.put(1, 0, aff2x3.get(1, 0)[0], aff2x3.get(1, 1)[0], aff2x3.get(1, 2)[0])
         return h
     }
 
     /** Prefer SIFT (in OpenCV 4.9 Maven AAR); ORB fallback. SCANS Stitcher not packaged in AAR. */
     private fun createDetector(): Feature2D {
         return try {
-            SIFT.create(0, 3, 0.04, 10.0, 1.6)
+            // Lower contrastThreshold → more keypoints on cleaned white paper.
+            SIFT.create(0, 3, 0.02, 10.0, 1.6)
         } catch (_: Throwable) {
-            ORB.create(2500)
+            ORB.create(4000)
         }
     }
 
@@ -494,12 +774,20 @@ class OpenCvDocumentStitcher(
             ?: runCatching { PaperMask.paperBlob(tile) }.getOrNull()
             ?: return tile
         val segMs = android.os.SystemClock.elapsedRealtime() - t
+        val fill = Core.countNonZero(blob).toDouble() / (tile.cols().toDouble() * tile.rows())
+        // ML Kit (and similar) already return cropped pages filling the frame —
+        // re-rectify / mask destroys geometry needed for multi-tile stitch.
+        if (fill >= 0.78) {
+            android.util.Log.i(TIMING_TAG, "maskToPaper skip (pre-cropped fill=$fill)")
+            blob.release()
+            return tile
+        }
         t = android.os.SystemClock.elapsedRealtime()
         val rectified = runCatching { rectifyFullPage(tile, blob) }.getOrNull()
         android.util.Log.i(
             TIMING_TAG,
             "maskToPaper seg=${segMs}ms rectify=${android.os.SystemClock.elapsedRealtime() - t}ms " +
-                "rectified=${rectified != null}",
+                "rectified=${rectified != null} fill=$fill",
         )
         if (rectified != null) {
             blob.release()
@@ -511,6 +799,88 @@ class OpenCvDocumentStitcher(
         blob.release()
         tile.release()
         return out
+    }
+
+    /**
+     * Vertical page stack for multi-page / non-overlapping ML Kit captures.
+     * Owns a new Mat; does not take ownership of [pages].
+     */
+    private fun stackPages(pages: List<Mat>): Mat? {
+        if (pages.isEmpty()) return null
+        if (pages.size == 1) return pages[0].clone()
+        val targetW = pages.maxOf { it.cols() }.coerceAtLeast(1)
+        val resized = ArrayList<Mat>(pages.size)
+        var totalH = 0
+        for (p in pages) {
+            val scale = targetW.toDouble() / p.cols().coerceAtLeast(1)
+            val h = max(1, (p.rows() * scale).toInt())
+            val r = Mat()
+            Imgproc.resize(p, r, Size(targetW.toDouble(), h.toDouble()), 0.0, 0.0, Imgproc.INTER_AREA)
+            resized.add(r)
+            totalH += h
+        }
+        val out = Mat.zeros(totalH, targetW, pages.first().type())
+        var y = 0
+        for (r in resized) {
+            val roi = out.rowRange(y, y + r.rows())
+            r.copyTo(roi)
+            y += r.rows()
+            r.release()
+        }
+        return out
+    }
+
+    /**
+     * Heuristic: similar aspect + size → likely overlapping tiles of one sheet
+     * (not distinct multi-page docs). Stacking those duplicates content.
+     */
+    private fun looksLikeSamePageTiles(frames: List<CaptureFrame>): Boolean {
+        if (frames.size < 2) return false
+        val aspects = frames.map {
+            val w = it.width.coerceAtLeast(1).toFloat()
+            val h = it.height.coerceAtLeast(1).toFloat()
+            w / h
+        }
+        val areas = frames.map {
+            it.width.toLong().coerceAtLeast(1) * it.height.toLong().coerceAtLeast(1)
+        }
+        val a0 = aspects[0]
+        val area0 = areas[0].toDouble()
+        return aspects.all { abs(it - a0) < 0.12f } &&
+            areas.all { abs(it - area0) / area0 < 0.35 }
+    }
+
+    /**
+     * Reject tall-skinny mis-stitches (audit mosaic 970×4800 / 2270×4537 from portrait tiles).
+     */
+    private fun isSensibleMosaic(mosaic: Mat, ref: Mat): Boolean {
+        val aM = mosaic.cols().toFloat() / mosaic.rows().coerceAtLeast(1)
+        val aR = ref.cols().toFloat() / ref.rows().coerceAtLeast(1)
+        val hGain = mosaic.rows().toFloat() / ref.rows().coerceAtLeast(1)
+        val wGain = mosaic.cols().toFloat() / ref.cols().coerceAtLeast(1)
+        if (aM < aR * 0.55f && hGain > 1.2f) {
+            android.util.Log.i(
+                TIMING_TAG,
+                "reject mosaic tall-skinny aM=$aM aR=$aR ${mosaic.cols()}x${mosaic.rows()}",
+            )
+            return false
+        }
+        // Portrait page tiles panned L/R should grow width at least as much as height.
+        if (aR < 1f && hGain > 1.3f && hGain > wGain * 1.05f) {
+            android.util.Log.i(
+                TIMING_TAG,
+                "reject mosaic vertical-grow hGain=$hGain wGain=$wGain",
+            )
+            return false
+        }
+        val areaGain =
+            (mosaic.cols().toLong() * mosaic.rows()) /
+                (ref.cols().toLong() * ref.rows()).toFloat()
+        if (areaGain < 1.1f && mosaic.cols() < ref.cols() * 1.08f) {
+            android.util.Log.i(TIMING_TAG, "reject mosaic no expansion gain=$areaGain")
+            return false
+        }
+        return true
     }
 
     /**
@@ -590,6 +960,32 @@ class OpenCvDocumentStitcher(
         return maskToPaper(work)
     }
 
+    /** Load without paper mask/rectify — for ML Kit pages already cropped. */
+    private fun loadMatRaw(uri: Uri): Mat? {
+        val path = uri.path ?: return null
+        val full = Imgcodecs.imread(path, Imgcodecs.IMREAD_COLOR)
+        if (!full.empty()) {
+            val work = ensureMaxLongEdge(full, WORK_LONG_EDGE)
+            if (work !== full) full.release()
+            return work
+        }
+        full.release()
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(path, bounds)
+        if (bounds.outWidth <= 0) return null
+        val opts = BitmapFactory.Options().apply {
+            inSampleSize = sampleSizeFor(bounds.outWidth, bounds.outHeight, WORK_LONG_EDGE)
+        }
+        val bmp = BitmapFactory.decodeFile(path, opts) ?: return null
+        val tmp = Mat()
+        org.opencv.android.Utils.bitmapToMat(bmp, tmp)
+        bmp.recycle()
+        val bgr = Mat()
+        Imgproc.cvtColor(tmp, bgr, Imgproc.COLOR_RGBA2BGR)
+        tmp.release()
+        return ensureMaxLongEdge(bgr, WORK_LONG_EDGE).also { if (it !== bgr) bgr.release() }
+    }
+
     private fun saveMatJpeg(mat: Mat, file: File): Boolean {
         file.parentFile?.mkdirs()
         return try {
@@ -635,18 +1031,21 @@ class OpenCvDocumentStitcher(
         private const val WORK_LONG_EDGE = 2200
 
         /** Keep final mosaic bounded to avoid OOM on mid phones. */
-        private const val MAX_MOSAIC_LONG_EDGE = 4200
-        private const val MAX_CANVAS_SIDE = 9000
-        private const val MAX_CANVAS_PIXELS = 30_000_000L
+        private const val MAX_MOSAIC_LONG_EDGE = 4800
+        private const val MAX_CANVAS_SIDE = 10000
+        private const val MAX_CANVAS_PIXELS = 36_000_000L
+
+        /** Prefer matching against the last N accepted neighbors before older anchors. */
+        private const val NEIGHBOR_WINDOW = 8
 
         /**
-         * Pair acceptance — validated on real captures and WhatsApp-compressed
-         * photos. Consecutive shots give 50+ homography inliers even on heavily
-         * compressed input; below 20 the transform isn't trustworthy.
+         * Pair acceptance — softened for ML Kit cleaned pages (fewer distinctive
+         * keypoints than raw camera tiles). Affine path uses a slightly lower floor.
          */
-        private const val MIN_GOOD_MATCHES = 12
-        private const val MIN_INLIERS = 20
-        private const val MIN_INLIER_FRACTION = 0.10f
+        private const val MIN_GOOD_MATCHES = 8
+        private const val MIN_INLIERS = 12
+        private const val MIN_INLIERS_AFFINE = 10
+        private const val MIN_INLIER_FRACTION = 0.08f
 
         private const val TIMING_TAG = "StitchTiming"
 

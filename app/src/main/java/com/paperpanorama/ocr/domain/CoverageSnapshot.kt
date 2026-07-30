@@ -1,22 +1,14 @@
 package com.paperpanorama.ocr.domain
 
-/** State of one of the four AR paper tiles (2×2). */
-enum class QuadTileState {
-    Pending,
-    Good,
-    Blurry,
-}
-
 /**
- * Guided 4-tile scan coach.
- * [readyToFinish] means all 4 tiles are Good — user may tap Done (never auto-advance).
+ * Whole-page 8×12 guided scan coach.
+ * [readyToFinish] = grid fully Locked, or ≥50% locked with ≥2 stills — user may Done anytime in camera UI.
  */
 data class CoverageSnapshot(
     val coveragePercent: Int = 0,
     val qualityPercent: Int = 0,
-    val nextHint: String = "Frame the whole page so all four tiles appear",
+    val nextHint: String = "Frame the whole page so the grid can lock on",
     val title: String = "Scan page",
-    /** True only when all 4 tiles are Good — enables Done; does not auto-stitch. */
     val readyToFinish: Boolean = false,
     val acceptedTiles: Int = 0,
     val registrationFailed: Boolean = false,
@@ -27,34 +19,39 @@ data class CoverageSnapshot(
     val noPaper: Boolean = false,
     val pullBack: Boolean = false,
     val cells: List<BandScanState> = emptyList(),
-    val gridCols: Int = 2,
-    val gridRows: Int = 2,
+    val gridCols: Int = GRID_COLS,
+    val gridRows: Int = GRID_ROWS,
     val bands: List<BandScanState> = emptyList(),
     val longAxisVertical: Boolean = true,
     val nextTargetNorm: Float? = null,
     val nextTargetCrossNorm: Float? = null,
     val guideDirection: ScanGuideDirection = ScanGuideDirection.None,
     val lastShotDuplicate: Boolean = false,
-    /** Four tile states: 0=TL, 1=TR, 2=BL, 3=BR. */
-    val tileStates: List<QuadTileState> = List(4) { QuadTileState.Pending },
-    /** Tile the system wants the user to capture next (0..3). */
+    /** Legacy alias: Locked→Good, Soft→Blurry, Empty→Pending (for old UI chips). */
+    val tileStates: List<QuadTileState> = emptyList(),
     val activeTileIndex: Int = 0,
     val goodTileCount: Int = 0,
-    /** Whole page was framed so the 2×2 map is valid. */
     val pageMapped: Boolean = false,
+    val lockedCellCount: Int = 0,
+    val softCellCount: Int = 0,
+    val emptyCellCount: Int = 0,
 ) {
     companion object {
         val Idle = CoverageSnapshot()
-        const val TILE_COUNT = 4
+        const val GRID_COLS = 8
+        const val GRID_ROWS = 12
+        const val TILE_COUNT = GRID_COLS * GRID_ROWS
+        const val MAX_LOCKED_OVERLAP = 0.30f
 
-        fun tileLabel(index: Int): String = when (index) {
-            0 -> "Top left"
-            1 -> "Top right"
-            2 -> "Bottom left"
-            3 -> "Bottom right"
-            else -> "Tile ${index + 1}"
-        }
+        fun tileLabel(index: Int): String = "Cell ${index + 1}"
     }
+}
+
+/** Legacy 2×2 naming kept for overlay chips that still map cell severity. */
+enum class QuadTileState {
+    Pending,
+    Good,
+    Blurry,
 }
 
 enum class ScanGuideDirection {

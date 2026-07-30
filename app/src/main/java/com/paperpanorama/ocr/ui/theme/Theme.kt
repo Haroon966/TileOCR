@@ -7,58 +7,64 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 
 /**
- * Soft Yellow surfaces + Deep Rich Red actions/text (from brand swatch).
- * Camera chrome: black / deep red-tint with Soft Yellow overlays.
+ * Lime primary on Canvas neutrals (design-system/MASTER.md).
+ * Camera chrome: near-black with lime accents.
  */
 private val LightColors = lightColorScheme(
-    primary = DeepRichRed,
-    onPrimary = SoftYellow,
-    secondary = DeepRichRed,
-    onSecondary = SoftYellow,
-    tertiary = DeepRichRed,
-    onTertiary = SoftYellow,
-    background = SoftYellow,
-    onBackground = DeepRichRed,
-    surface = SoftYellow,
-    onSurface = DeepRichRed,
-    surfaceVariant = SoftYellow,
-    onSurfaceVariant = DeepRichRed.copy(alpha = 0.75f),
-    outline = DeepRichRed.copy(alpha = 0.35f),
-    error = DeepRichRed,
-    onError = SoftYellow,
+    primary = Lime400,
+    onPrimary = Ink,
+    primaryContainer = Lime50,
+    onPrimaryContainer = Ink,
+    secondary = Lime300,
+    onSecondary = Ink,
+    secondaryContainer = SurfaceMuted,
+    onSecondaryContainer = Ink,
+    tertiary = Lime200,
+    onTertiary = Ink,
+    background = Canvas,
+    onBackground = Ink,
+    surface = Canvas,
+    onSurface = Ink,
+    surfaceVariant = SurfaceMuted,
+    onSurfaceVariant = Muted,
+    outline = Border,
+    outlineVariant = Border,
+    error = ErrorSoft,
+    onError = Ink,
 )
 
-/** Immersive camera / stitch — Soft Yellow chrome on near-black. */
+/** Immersive camera / stitch — lime chrome on near-black. */
 val CameraColorScheme = darkColorScheme(
-    primary = SoftYellow,
-    onPrimary = DeepRichRed,
-    secondary = SoftYellow,
-    onSecondary = DeepRichRed,
-    tertiary = DeepRichRed,
-    onTertiary = SoftYellow,
+    primary = Lime400,
+    onPrimary = Ink,
+    secondary = Lime200,
+    onSecondary = Ink,
+    tertiary = Lime50,
+    onTertiary = Ink,
     background = CameraBlack,
-    onBackground = SoftYellow,
+    onBackground = OnCamera,
     surface = CameraChrome,
-    onSurface = SoftYellow,
-    error = SoftYellow,
-    onError = DeepRichRed,
+    onSurface = OnCamera,
+    surfaceVariant = CameraChrome,
+    onSurfaceVariant = OnCamera.copy(alpha = 0.75f),
+    outline = Border.copy(alpha = 0.4f),
+    error = ErrorSoft,
+    onError = Ink,
 )
-
-private val ColorDeepBg = androidx.compose.ui.graphics.Color(0xFF2A0705)
 
 private val DarkColors = darkColorScheme(
-    primary = SoftYellow,
-    onPrimary = DeepRichRed,
-    secondary = SoftYellow,
-    onSecondary = DeepRichRed,
-    tertiary = SoftYellow,
-    onTertiary = DeepRichRed,
-    background = ColorDeepBg,
-    onBackground = SoftYellow,
+    primary = Lime400,
+    onPrimary = Ink,
+    secondary = Lime200,
+    onSecondary = Ink,
+    tertiary = Lime50,
+    onTertiary = Ink,
+    background = CameraChrome,
+    onBackground = OnCamera,
     surface = CameraChrome,
-    onSurface = SoftYellow,
-    error = SoftYellow,
-    onError = DeepRichRed,
+    onSurface = OnCamera,
+    error = ErrorSoft,
+    onError = Ink,
 )
 
 @Composable
