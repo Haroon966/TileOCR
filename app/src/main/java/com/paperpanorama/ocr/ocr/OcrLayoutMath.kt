@@ -92,4 +92,25 @@ object OcrLayoutMath {
         val t = type.lowercase()
         return t == "title" || t == "heading" || t == "header"
     }
+
+    /**
+     * Y positions for [lineCount] lines inside a box.
+     * Uses [lineHeight] for each line; leftover vertical space is spread evenly between lines.
+     */
+    fun lineTops(boxTop: Int, boxHeight: Int, lineCount: Int, lineHeight: Float): FloatArray {
+        if (lineCount <= 0) return FloatArray(0)
+        if (lineCount == 1) return floatArrayOf(boxTop.toFloat())
+        val used = lineHeight * lineCount
+        val spare = (boxHeight - used).coerceAtLeast(0f)
+        val gap = spare / (lineCount - 1)
+        val step = lineHeight + gap
+        return FloatArray(lineCount) { i -> boxTop + i * step }
+    }
+
+    /** Canvas size: prefer larger of local page vs API dims for sharper text. */
+    fun renderSize(pageW: Int, pageH: Int, apiPageW: Int, apiPageH: Int): Pair<Int, Int> {
+        val w = max(pageW.coerceAtLeast(1), apiPageW.coerceAtLeast(0))
+        val h = max(pageH.coerceAtLeast(1), apiPageH.coerceAtLeast(0))
+        return w to h
+    }
 }

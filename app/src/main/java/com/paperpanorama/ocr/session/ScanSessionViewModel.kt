@@ -24,7 +24,8 @@ import com.paperpanorama.ocr.domain.StitchResult
 import com.paperpanorama.ocr.library.ScanLibrary
 import com.paperpanorama.ocr.ocr.CleanPageRenderer
 import com.paperpanorama.ocr.ocr.MistralOcrClient
-import com.paperpanorama.ocr.ocr.OcrBlock
+import com.paperpanorama.ocr.ocr.OcrPdfBuilder
+import com.paperpanorama.ocr.ocr.OcrTextClean
 import com.paperpanorama.ocr.orient.OpenCvFrameNormalizer
 import com.paperpanorama.ocr.stitch.OpenCvDocumentStitcher
 import com.paperpanorama.ocr.util.BitmapDecode
@@ -86,9 +87,14 @@ data class ScanUiState(
     val isSavingPage: Boolean = false,
     /** Mistral OCR → clean white page. */
     val isRunningOcr: Boolean = false,
+    val ocrStatus: String = "",
     val ocrMarkdown: String = "",
     val ocrCleanUri: Uri? = null,
+    val ocrPdfUri: Uri? = null,
     val ocrError: String? = null,
+    val isBuildingBatchPdf: Boolean = false,
+    val batchPdfProgress: String = "",
+    val batchPdfUri: Uri? = null,
 )
 
 
@@ -845,8 +851,10 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
             _state.update {
                 it.copy(
                     isRunningOcr = true,
+                    ocrStatus = "Calling Mistral…",
                     ocrError = null,
                     ocrCleanUri = null,
+                    ocrPdfUri = null,
                     ocrMarkdown = "",
                 )
             }
@@ -855,7 +863,7 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
             val path = page.path
             if (path.isNullOrBlank()) {
                 _state.update {
-                    it.copy(isRunningOcr = false, ocrError = "Page path missing")
+                    it.copy(isRunningOcr = false, ocrStatus = "", ocrError = "Page path missing")
                 }
                 return@launch
             }
@@ -864,25 +872,21 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
             when (apiResult) {
                 is MistralOcrClient.Result.Err -> {
                     _state.update {
-                        it.copy(isRunningOcr = false, ocrError = apiResult.message)
+                        it.copy(
+                            isRunningOcr = false,
+                            ocrStatus = "",
+                            ocrError = apiResult.message,
+                        )
                     }
                 }
                 is MistralOcrClient.Result.Ok -> {
                     try {
+                        _state.update { it.copy(ocrStatus = "Building page…") }
                         val pageW = _state.value.pageWidth.coerceAtLeast(1)
                         val pageH = _state.value.pageHeight.coerceAtLeast(1)
                         var blocks = apiResult.page.blocks
                         if (blocks.isEmpty() && apiResult.page.markdown.isNotBlank()) {
-                            blocks = listOf(
-                                OcrBlock(
-                                    type = "text",
-                                    text = apiResult.page.markdown,
-                                    left = 0.06f,
-                                    top = 0.06f,
-                                    right = 0.94f,
-                                    bottom = 0.94f,
-                                ),
-                            )
+                            blocks = OcrTextClean.markdownFallbackBlocks(apiResult.page.markdown)
                         }
                         val clean = withContext(Dispatchers.Default) {
                             CleanPageRenderer(app).render(
@@ -901,11 +905,34 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
                             }
                         }
                         clean.recycle()
+
+                        // Build PDF: text at exact positions + image blocks cropped from original
+                        _state.update { it.copy(ocrStatus = "Building PDF…") }
+                        val pdfFile = File(outDir, "ocr_${System.currentTimeMillis()}.pdf")
+                        val originalPageFile = path.let { File(it) }
+                        val renderer = CleanPageRenderer(app)
+                        val regular = renderer.regularTypeface()
+                        val semibold = renderer.semiboldTypeface()
+                        withContext(Dispatchers.IO) {
+                            OcrPdfBuilder.build(
+                                blocks = blocks,
+                                apiPageW = apiResult.page.pageWidth,
+                                apiPageH = apiResult.page.pageHeight,
+                                originalImageFile = originalPageFile,
+                                regularTypeface = regular,
+                                semiboldTypeface = semibold,
+                                outFile = pdfFile,
+                            )
+                        }
+
                         _state.update {
                             it.copy(
                                 isRunningOcr = false,
-                                ocrMarkdown = apiResult.page.markdown,
+                                ocrStatus = "",
+                                ocrMarkdown = OcrTextClean.stripMarkdown(apiResult.page.markdown)
+                                    .ifBlank { apiResult.page.markdown },
                                 ocrCleanUri = Uri.fromFile(outFile),
+                                ocrPdfUri = if (pdfFile.exists()) Uri.fromFile(pdfFile) else null,
                                 ocrError = null,
                             )
                         }
@@ -913,6 +940,7 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
                         _state.update {
                             it.copy(
                                 isRunningOcr = false,
+                                ocrStatus = "",
                                 ocrError = t.message ?: "Could not build clean page",
                             )
                         }
@@ -932,20 +960,140 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun saveOcrCleanImage() {
-        val uri = _state.value.ocrCleanUri ?: return
+    fun saveOcrPdf() {
+        val uri = _state.value.ocrPdfUri ?: return
+        val app = getApplication<Application>()
+        viewModelScope.launch {
+            val pdfFile = uri.path?.let { File(it) } ?: return@launch
+            val name = "TileOCR_${System.currentTimeMillis()}.pdf"
+            val saved = withContext(Dispatchers.IO) {
+                MediaSaver.savePdfToDownloads(app, pdfFile, name)
+            }
+            navChannel.send(
+                ScanNavEvent.Snackbar(if (saved != null) "PDF saved to Downloads" else "Could not save PDF"),
+            )
+        }
+    }
+
+    fun downloadPageImage() {
+        val uri = _state.value.pageUri ?: return
         val app = getApplication<Application>()
         viewModelScope.launch {
             val ok = withContext(Dispatchers.IO) {
                 MediaSaver.saveToGallery(
                     app,
                     uri,
-                    "ocr_clean_${System.currentTimeMillis()}.jpg",
+                    "page_${System.currentTimeMillis()}.jpg",
                 )
             }
             navChannel.send(
                 ScanNavEvent.Snackbar(if (ok) "Saved to gallery" else "Could not save"),
             )
+        }
+    }
+
+    fun saveActiveImage(isClean: Boolean) {
+        val uri = if (isClean) _state.value.ocrCleanUri else _state.value.pageUri
+        uri ?: return
+        val app = getApplication<Application>()
+        viewModelScope.launch {
+            val name = if (isClean) {
+                "ocr_clean_${System.currentTimeMillis()}.jpg"
+            } else {
+                "ocr_original_${System.currentTimeMillis()}.jpg"
+            }
+            val ok = withContext(Dispatchers.IO) {
+                MediaSaver.saveToGallery(app, uri, name)
+            }
+            navChannel.send(
+                ScanNavEvent.Snackbar(if (ok) "Saved to gallery" else "Could not save"),
+            )
+        }
+    }
+
+    fun renameScan(id: String, newTitle: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            library.updateTitle(id, newTitle)
+            val scans = library.list()
+            withContext(Dispatchers.Main) {
+                _state.update { it.copy(library = scans) }
+            }
+        }
+    }
+
+    fun buildCombinedPdf(scanIds: List<String>) {
+        if (scanIds.size < 2) return
+        if (_state.value.isBuildingBatchPdf) return
+        val key = BuildConfig.MISTRAL_API_KEY
+        if (key.isBlank()) {
+            viewModelScope.launch { navChannel.send(ScanNavEvent.Snackbar("Set mistral_api_key in .env")) }
+            return
+        }
+        viewModelScope.launch {
+            _state.update { it.copy(isBuildingBatchPdf = true, batchPdfProgress = "", batchPdfUri = null) }
+            try {
+                val app = getApplication<Application>()
+                val client = MistralOcrClient(key)
+                val renderer = CleanPageRenderer(app)
+                val regular = renderer.regularTypeface()
+                val semibold = renderer.semiboldTypeface()
+                val inputs = mutableListOf<OcrPdfBuilder.PdfPageInput>()
+
+                scanIds.forEachIndexed { idx, id ->
+                    _state.update { it.copy(batchPdfProgress = "Page ${idx + 1} / ${scanIds.size}") }
+                    val scan = withContext(Dispatchers.IO) { library.get(id) } ?: return@forEachIndexed
+                    val path = scan.pageUri.path ?: return@forEachIndexed
+                    val file = File(path)
+                    if (!file.exists()) return@forEachIndexed
+                    val result = client.processJpegFile(file)
+                    if (result is MistralOcrClient.Result.Ok) {
+                        var blocks = result.page.blocks
+                        if (blocks.isEmpty() && result.page.markdown.isNotBlank()) {
+                            blocks = OcrTextClean.markdownFallbackBlocks(result.page.markdown)
+                        }
+                        inputs.add(
+                            OcrPdfBuilder.PdfPageInput(
+                                blocks = blocks,
+                                apiPageW = result.page.pageWidth,
+                                apiPageH = result.page.pageHeight,
+                                originalImageFile = file,
+                            ),
+                        )
+                    }
+                }
+
+                if (inputs.isEmpty()) {
+                    _state.update { it.copy(isBuildingBatchPdf = false, batchPdfProgress = "") }
+                    navChannel.send(ScanNavEvent.Snackbar("No pages could be processed"))
+                    return@launch
+                }
+
+                _state.update { it.copy(batchPdfProgress = "Writing PDF…") }
+                val outDir = File(app.cacheDir, "ocr_clean").also { it.mkdirs() }
+                val pdfFile = File(outDir, "batch_${System.currentTimeMillis()}.pdf")
+                withContext(Dispatchers.IO) {
+                    OcrPdfBuilder.buildMultiPage(
+                        pages = inputs,
+                        regularTypeface = regular,
+                        semiboldTypeface = semibold,
+                        outFile = pdfFile,
+                    )
+                }
+                val name = "TileOCR_${System.currentTimeMillis()}.pdf"
+                val saved = withContext(Dispatchers.IO) {
+                    MediaSaver.savePdfToDownloads(app, pdfFile, name)
+                }
+                _state.update {
+                    it.copy(isBuildingBatchPdf = false, batchPdfProgress = "", batchPdfUri = saved)
+                }
+                navChannel.send(
+                    ScanNavEvent.Snackbar(if (saved != null) "PDF saved to Downloads" else "Could not save PDF"),
+                )
+            } catch (t: Throwable) {
+                if (t is kotlinx.coroutines.CancellationException) throw t
+                _state.update { it.copy(isBuildingBatchPdf = false, batchPdfProgress = "") }
+                navChannel.send(ScanNavEvent.Snackbar(t.message ?: "Failed to build PDF"))
+            }
         }
     }
 

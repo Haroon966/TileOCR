@@ -98,6 +98,23 @@ class ScanLibrary(context: Context) {
         return get(id)
     }
 
+    fun updateTitle(id: String, newTitle: String): Boolean {
+        val trimmed = newTitle.trim()
+        if (trimmed.isBlank()) return false
+        val dir = File(root, id)
+        if (!dir.isDirectory) return false
+        val metaFile = File(dir, META_NAME)
+        if (!metaFile.exists()) return false
+        return try {
+            val json = JSONObject(metaFile.readText())
+            json.put("title", trimmed)
+            metaFile.writeText(json.toString())
+            true
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
     fun delete(id: String): Boolean {
         val dir = File(root, id)
         if (!dir.isDirectory) return false

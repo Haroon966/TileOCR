@@ -51,4 +51,10 @@ class OcrLayoutMathTest {
         assertTrue(OcrLayoutMath.isTitleBlock("title"))
         assertFalse(OcrLayoutMath.isTitleBlock("text"))
     }
+
+    @Test
+    fun renderSize_prefersLarger() {
+        assertEquals(2000 to 3000, OcrLayoutMath.renderSize(1000, 1500, 2000, 3000))
+        assertEquals(1200 to 1600, OcrLayoutMath.renderSize(1200, 1600, 800, 900))
+    }
 }

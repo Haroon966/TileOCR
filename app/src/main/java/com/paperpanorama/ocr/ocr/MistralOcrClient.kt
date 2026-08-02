@@ -3,7 +3,9 @@ package com.paperpanorama.ocr.ocr
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.Base64
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -54,24 +56,40 @@ class MistralOcrClient(
                 .post(body)
                 .build()
 
-            try {
-                http.newCall(request).execute().use { resp ->
-                    val raw = resp.body?.string().orEmpty()
-                    if (!resp.isSuccessful) {
-                        val msg = OcrJsonParse.parseError(raw) ?: "OCR failed (${resp.code})"
-                        return@withContext Result.Err(msg)
+            var lastErr: Result.Err = Result.Err("Network error")
+            repeat(MAX_ATTEMPTS) { attempt ->
+                if (attempt > 0) delay(RETRY_DELAY_MS)
+                try {
+                    http.newCall(request).execute().use { resp ->
+                        val raw = resp.body?.string().orEmpty()
+                        if (!resp.isSuccessful) {
+                            // HTTP errors (4xx/5xx) are not retried — fail immediately
+                            val msg = when (resp.code) {
+                                401, 403 -> "Mistral API key rejected — check mistral_api_key in .env"
+                                429 -> "Mistral rate limit — try again in a moment"
+                                else -> OcrJsonParse.parseError(raw) ?: "OCR failed (${resp.code})"
+                            }
+                            return@withContext Result.Err(msg)
+                        }
+                        val page = OcrJsonParse.parseResponse(raw)
+                            ?: return@withContext Result.Err("Empty OCR response")
+                        return@withContext Result.Ok(page)
                     }
-                    val page = OcrJsonParse.parseResponse(raw)
-                        ?: return@withContext Result.Err("Empty OCR response")
-                    Result.Ok(page)
+                } catch (t: Throwable) {
+                    if (t is CancellationException) throw t
+                    lastErr = Result.Err(
+                        if (attempt < MAX_ATTEMPTS - 1) "Retrying… (${t.message})"
+                        else t.message ?: "Network error"
+                    )
                 }
-            } catch (t: Throwable) {
-                Result.Err(t.message ?: "Network error")
             }
+            lastErr
         }
 
     companion object {
         private const val OCR_URL = "https://api.mistral.ai/v1/ocr"
+        private const val MAX_ATTEMPTS = 3
+        private const val RETRY_DELAY_MS = 2_000L
         private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
 
         fun defaultClient(): OkHttpClient =

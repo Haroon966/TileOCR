@@ -254,6 +254,10 @@ fun PaperPanoramaApp(
                     onNewScan = { requestCameraAccess() },
                     onOpenScan = viewModel::openScan,
                     onDeleteScan = viewModel::deleteScan,
+                    onRename = { id, title -> viewModel.renameScan(id, title) },
+                    isBuildingBatchPdf = state.isBuildingBatchPdf,
+                    batchPdfProgress = state.batchPdfProgress,
+                    onBuildCombinedPdf = viewModel::buildCombinedPdf,
                 )
             }
             composable(Destinations.Camera.route) {
@@ -351,6 +355,7 @@ fun PaperPanoramaApp(
                     onSelectScan = viewModel::selectLibraryScan,
                     onAutoEnhance = viewModel::reEnhancePage,
                     onCrop = viewModel::beginCrop,
+                    onDownload = viewModel::downloadPageImage,
                     onRotate = viewModel::rotateOcrPage,
                     onOcr = viewModel::runMistralOcr,
                     onRetake = viewModel::retake,
@@ -369,12 +374,17 @@ fun PaperPanoramaApp(
             }
             composable(Destinations.OcrResult.route) {
                 OcrResultScreen(
+                    pageUri = state.pageUri,
                     cleanUri = state.ocrCleanUri,
                     markdown = state.ocrMarkdown,
                     isRunning = state.isRunningOcr,
+                    status = state.ocrStatus,
                     error = state.ocrError,
                     onCopy = { viewModel.copyOcrMarkdown(context) },
-                    onSave = viewModel::saveOcrCleanImage,
+                    onSave = { isClean -> viewModel.saveActiveImage(isClean) },
+                    onExportPdf = viewModel::saveOcrPdf,
+                    pdfReady = state.ocrPdfUri != null,
+                    onRetry = viewModel::runMistralOcr,
                     onBack = {
                         navController.popBackStack()
                     },

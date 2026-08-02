@@ -83,4 +83,35 @@ object MediaSaver {
     }
 
     fun pageDisplayName(libraryId: String): String = "page_$libraryId.jpg"
+
+    /** Save a PDF file to the device Downloads folder. Returns the Uri on success. */
+    fun savePdfToDownloads(context: Context, sourceFile: File, displayName: String): Uri? {
+        if (!sourceFile.exists()) return null
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values = ContentValues().apply {
+                    put(MediaStore.Downloads.DISPLAY_NAME, displayName)
+                    put(MediaStore.Downloads.MIME_TYPE, "application/pdf")
+                    put(MediaStore.Downloads.IS_PENDING, 1)
+                }
+                val collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI
+                val uri = context.contentResolver.insert(collection, values) ?: return null
+                context.contentResolver.openOutputStream(uri)?.use { out ->
+                    sourceFile.inputStream().use { it.copyTo(out) }
+                }
+                values.clear()
+                values.put(MediaStore.Downloads.IS_PENDING, 0)
+                context.contentResolver.update(uri, values, null, null)
+                uri
+            } else {
+                val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                dir.mkdirs()
+                val dest = File(dir, displayName)
+                sourceFile.copyTo(dest, overwrite = true)
+                Uri.fromFile(dest)
+            }
+        } catch (_: Throwable) {
+            null
+        }
+    }
 }

@@ -26,9 +26,11 @@ import androidx.compose.material.icons.outlined.AutoFixHigh
 import androidx.compose.material.icons.outlined.Crop
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.DocumentScanner
+import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Rotate90DegreesCcw
 import androidx.compose.material.icons.outlined.TextFields
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -53,6 +55,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.paperpanorama.ocr.domain.SavedScan
 import com.paperpanorama.ocr.ui.components.ZoomableImage
 import com.paperpanorama.ocr.ui.components.galleryPreviewMaxSide
@@ -80,6 +83,7 @@ fun OcrReadyScreen(
     onSelectScan: (String) -> Unit,
     onAutoEnhance: () -> Unit,
     onCrop: () -> Unit,
+    onDownload: () -> Unit,
     onRotate: () -> Unit,
     onOcr: () -> Unit,
     onRetake: () -> Unit,
@@ -198,31 +202,71 @@ fun OcrReadyScreen(
             }
         }
 
-        // Bottom tool sheet — matches opened-image reference.
+        // Bottom tool sheet
         Surface(
-            color = Lime400,
+            color = Ink,
             shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
-            shadowElevation = 8.dp,
+            shadowElevation = 12.dp,
             modifier = Modifier.fillMaxWidth(),
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 20.dp, bottom = 12.dp),
+                    .padding(bottom = 20.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
+                // Drag handle
+                Box(
+                    modifier = Modifier
+                        .padding(top = 10.dp, bottom = 18.dp)
+                        .size(width = 36.dp, height = 4.dp)
+                        .clip(RoundedCornerShape(50.dp))
+                        .background(androidx.compose.ui.graphics.Color.White.copy(alpha = 0.18f)),
+                )
+
+                // ── PRIMARY CTA: Run OCR ─────────────────────────────────────
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(
+                            if (pageReady && toolsEnabled) Lime400
+                            else Lime400.copy(alpha = 0.35f)
+                        )
+                        .clickable(enabled = pageReady && toolsEnabled, onClick = onOcr)
+                        .padding(vertical = 14.dp)
+                        .semantics { contentDescription = "Run OCR" },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.TextFields,
+                            contentDescription = null,
+                            tint = Ink,
+                            modifier = Modifier.size(20.dp),
+                        )
+                        Text(
+                            text = "Run OCR",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = Ink,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // ── SECONDARY TOOLS: Crop, Auto, Download, Rotate ───────────
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 12.dp),
+                        .padding(horizontal = 8.dp),
                     horizontalArrangement = Arrangement.SpaceEvenly,
                 ) {
-                    EditTool(
-                        icon = Icons.Outlined.AutoFixHigh,
-                        label = "Auto",
-                        enabled = pageReady && toolsEnabled,
-                        onClick = onAutoEnhance,
-                    )
                     EditTool(
                         icon = Icons.Outlined.Crop,
                         label = "Crop",
@@ -230,64 +274,103 @@ fun OcrReadyScreen(
                         onClick = onCrop,
                     )
                     EditTool(
+                        icon = Icons.Outlined.AutoFixHigh,
+                        label = "Auto",
+                        enabled = pageReady && toolsEnabled,
+                        onClick = onAutoEnhance,
+                    )
+                    EditTool(
+                        icon = Icons.Outlined.Download,
+                        label = "Download",
+                        enabled = pageReady && toolsEnabled,
+                        onClick = onDownload,
+                    )
+                    EditTool(
                         icon = Icons.Outlined.Rotate90DegreesCcw,
                         label = "Rotate",
                         enabled = pageReady && toolsEnabled,
                         onClick = onRotate,
                     )
-                    EditTool(
-                        icon = Icons.Outlined.TextFields,
-                        label = "OCR",
-                        enabled = pageReady && toolsEnabled,
-                        onClick = onOcr,
-                    )
-                    EditTool(
-                        icon = Icons.Outlined.DocumentScanner,
-                        label = "Rescan",
-                        enabled = toolsEnabled,
-                        onClick = onRetake,
-                    )
-                    if (fromLibrary) {
-                        EditTool(
-                            icon = Icons.Outlined.DeleteOutline,
-                            label = "Delete",
-                            enabled = toolsEnabled,
-                            onClick = { pendingDelete = true },
-                        )
-                    }
                 }
 
-                Spacer(modifier = Modifier.height(20.dp))
+                Spacer(modifier = Modifier.height(4.dp))
 
+                // ── DIVIDER ──────────────────────────────────────────────────
+                HorizontalDivider(
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+                    color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.08f),
+                )
+
+                // ── FOOTER: Cancel | Rescan / Delete | Done ──────────────────
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 28.dp),
+                        .padding(horizontal = 20.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    // Cancel
                     Text(
                         text = "Cancel",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = Ink.copy(alpha = 0.75f),
+                        style = MaterialTheme.typography.labelLarge,
+                        color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.55f),
                         modifier = Modifier
                             .clip(RoundedCornerShape(8.dp))
                             .clickable(onClick = onBack)
-                            .padding(horizontal = 8.dp, vertical = 10.dp)
+                            .padding(horizontal = 10.dp, vertical = 8.dp)
                             .semantics { contentDescription = "Cancel" },
                     )
-                    Text(
-                        text = "Done",
-                        style = MaterialTheme.typography.titleMedium.copy(
-                            fontWeight = FontWeight.Bold,
-                        ),
-                        color = Ink,
+
+                    // Rescan + Delete (utility, center)
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = "Rescan",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.55f),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable(enabled = toolsEnabled, onClick = onRetake)
+                                .padding(horizontal = 10.dp, vertical = 8.dp)
+                                .semantics { contentDescription = "Rescan" },
+                        )
+                        if (fromLibrary) {
+                            Text(
+                                text = "·",
+                                color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.25f),
+                                style = MaterialTheme.typography.labelLarge,
+                            )
+                            Text(
+                                text = "Delete",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = androidx.compose.ui.graphics.Color(0xFFFF6B6B).copy(alpha = 0.8f),
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable(enabled = toolsEnabled, onClick = { pendingDelete = true })
+                                    .padding(horizontal = 10.dp, vertical = 8.dp)
+                                    .semantics { contentDescription = "Delete" },
+                            )
+                        }
+                    }
+
+                    // Done
+                    Box(
                         modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Lime400)
                             .clickable(onClick = onDone)
-                            .padding(horizontal = 8.dp, vertical = 10.dp)
+                            .padding(horizontal = 20.dp, vertical = 8.dp)
                             .semantics { contentDescription = "Done" },
-                    )
+                    ) {
+                        Text(
+                            text = "Done",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = Ink,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
                 }
             }
         }
@@ -325,27 +408,29 @@ private fun EditTool(
     enabled: Boolean,
     onClick: () -> Unit,
 ) {
-    val tint = if (enabled) Ink else Ink.copy(alpha = 0.35f)
+    val activeColor = androidx.compose.ui.graphics.Color.White
+    val tint = if (enabled) activeColor else activeColor.copy(alpha = 0.3f)
     TextButton(
         onClick = onClick,
         enabled = enabled,
         modifier = Modifier
-            .widthIn(min = 64.dp)
+            .widthIn(min = 60.dp)
             .semantics { contentDescription = label },
-        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 8.dp),
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Icon(
                 imageVector = icon,
                 contentDescription = null,
                 tint = tint,
-                modifier = Modifier.size(28.dp),
+                modifier = Modifier.size(26.dp),
             )
-            Spacer(modifier = Modifier.height(6.dp))
+            Spacer(modifier = Modifier.height(5.dp))
             Text(
                 text = label,
-                style = MaterialTheme.typography.labelMedium,
+                style = MaterialTheme.typography.labelSmall,
                 color = tint,
+                fontSize = 11.sp,
             )
         }
     }
