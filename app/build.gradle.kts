@@ -4,20 +4,21 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-fun readMistralApiKeyFromEnv(): String {
+fun readEnvKey(name: String): String {
     val envFile = rootProject.file(".env")
     if (!envFile.isFile) return ""
     return envFile.readLines()
         .map { it.trim() }
         .filter { it.isNotEmpty() && !it.startsWith("#") }
-        .firstOrNull { it.startsWith("mistral_api_key=") }
+        .firstOrNull { it.startsWith("$name=") }
         ?.substringAfter("=")
         ?.trim()
         ?.trim('"')
         .orEmpty()
 }
 
-val mistralApiKey: String = readMistralApiKeyFromEnv()
+val mistralApiKey: String = readEnvKey("mistral_api_key")
+val googleVisionApiKey: String = readEnvKey("GOOGLE_VISION_API_KEY")
 
 android {
     namespace = "com.paperpanorama.ocr"
@@ -32,6 +33,7 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         buildConfigField("String", "MISTRAL_API_KEY", "\"${mistralApiKey.replace("\"", "\\\"")}\"")
+        buildConfigField("String", "GOOGLE_VISION_API_KEY", "\"${googleVisionApiKey.replace("\"", "\\\"")}\"")
 
         ndk {
             // Phone is arm64; skip unused ABIs.
@@ -108,6 +110,7 @@ dependencies {
     implementation("org.tensorflow:tensorflow-lite:2.16.1")
 
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")

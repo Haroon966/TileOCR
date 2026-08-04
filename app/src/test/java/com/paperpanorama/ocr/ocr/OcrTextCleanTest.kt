@@ -40,6 +40,8 @@ class OcrTextCleanTest {
 
     @Test
     fun markdownFallbackBlocks_stacksParagraphs() {
+        assertEquals("Shoaib", OcrTextClean.fixCommonTypos("Shaab"))
+        assertEquals("Mahnoor", OcrTextClean.fixCommonTypos("Mahnour"))
         val blocks = OcrTextClean.markdownFallbackBlocks("Para one.\n\nPara two.\n\nPara three.")
         assertEquals(3, blocks.size)
         assertTrue(blocks[0].top < blocks[1].top)

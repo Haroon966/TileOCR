@@ -38,7 +38,7 @@ class MistralOcrClient(
                 ?: return@withContext Result.Err("Could not read page image")
             val b64 = Base64.encodeToString(jpegBytes, Base64.NO_WRAP)
             val body = JSONObject()
-                .put("model", "mistral-ocr-latest")
+                .put("model", "mistral-ocr-4")
                 .put(
                     "document",
                     JSONObject()

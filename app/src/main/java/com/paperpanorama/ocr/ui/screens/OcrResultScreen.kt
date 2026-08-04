@@ -79,7 +79,7 @@ fun OcrResultScreen(
     onBack: () -> Unit,
     pdfReady: Boolean = false,
 ) {
-    var showClean by remember { mutableStateOf(true) }
+    var showClean by remember(cleanUri) { mutableStateOf(cleanUri != null) }
 
     Column(
         modifier = Modifier
@@ -117,7 +117,7 @@ fun OcrResultScreen(
         HorizontalDivider(color = Ink.copy(alpha = 0.08f), thickness = 1.dp)
 
         // ── Toggle chips ─────────────────────────────────────────────────────
-        if (!isRunning && error == null && (cleanUri != null || pageUri != null)) {
+        if (!isRunning && error == null && cleanUri != null) {
             SegmentedToggle(
                 showClean = showClean,
                 onSelect = { showClean = it },

@@ -113,4 +113,119 @@ object OcrLayoutMath {
         val h = max(pageH.coerceAtLeast(1), apiPageH.coerceAtLeast(0))
         return w to h
     }
+
+    /**
+     * Prepare OCR text for stretch-into-bbox draw: keep newlines, collapse spaces
+     * within each line only. Does not wrap or invent layout.
+     */
+    fun stretchText(raw: String): String {
+        if (raw.isBlank()) return ""
+        return raw.replace("\r\n", "\n").replace('\r', '\n')
+            .split('\n')
+            .joinToString("\n") { line ->
+                line.replace(Regex("[ \\t]+"), " ").trim()
+            }
+            .replace(Regex("\\n{3,}"), "\n\n")
+            .trim()
+    }
+
+    /**
+     * Horizontal scale so measured text width fills [boxW] (may expand).
+     * Returns 1 when measured is empty/zero; never Inf/NaN.
+     */
+    fun textStretchScaleX(boxW: Float, measuredW: Float): Float {
+        val bw = boxW.coerceAtLeast(1f)
+        if (measuredW <= 0f || !measuredW.isFinite()) return 1f
+        val scale = bw / measuredW
+        return if (scale.isFinite() && scale > 0f) scale else 1f
+    }
+
+    /** Shrink-only scale: never expand past natural glyph width. */
+    fun textFitScaleX(boxW: Float, measuredW: Float): Float =
+        textStretchScaleX(boxW, measuredW).coerceAtMost(1f)
+
+    /** Non-empty lines after [stretchText] — OCR newlines only, no wrap. */
+    fun stretchLines(raw: String): List<String> =
+        stretchText(raw)
+            .split('\n')
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+
+    /**
+     * Equal-height vertical bands for [lineCount] OCR lines inside a box.
+     * Used for single-line fill path / searchable word boxes.
+     */
+    fun equalLineBands(box: PixelBox, lineCount: Int): List<PixelBox> {
+        if (lineCount <= 0) return emptyList()
+        if (lineCount == 1) return listOf(box)
+        val bandH = box.height / lineCount
+        return List(lineCount) { i ->
+            val top = box.top + i * bandH
+            val bottom = if (i == lineCount - 1) box.bottom else top + bandH
+            PixelBox(box.left, top, box.right, max(bottom, top + 1))
+        }
+    }
+
+    /**
+     * Split multi-line text blocks into one block per OCR line, carving equal
+     * vertical bands from the parent box (same coords space as input — norm or px).
+     * Types become [LINE_TYPE] so render fits (left-aligned) instead of full-box stretch.
+     * Non-text / single-line / [WORD_TYPE] blocks pass through.
+     */
+    fun expandMultilineToLineBlocks(blocks: List<OcrBlock>): List<OcrBlock> {
+        if (blocks.isEmpty()) return blocks
+        val out = ArrayList<OcrBlock>(blocks.size * 2)
+        for (block in blocks) {
+            if (!isDrawableTextBlock(block.type) || block.type.equals(WORD_TYPE, ignoreCase = true)) {
+                out.add(block)
+                continue
+            }
+            val lines = stretchLines(block.text)
+            if (lines.size <= 1) {
+                out.add(block)
+                continue
+            }
+            val span = block.bottom - block.top
+            val band = span / lines.size
+            lines.forEachIndexed { i, line ->
+                val top = block.top + i * band
+                val bottom = if (i == lines.size - 1) block.bottom else top + band
+                out.add(
+                    OcrBlock(
+                        type = LINE_TYPE,
+                        text = line,
+                        left = block.left,
+                        top = top,
+                        right = block.right,
+                        bottom = bottom,
+                    ),
+                )
+            }
+        }
+        return out
+    }
+
+    const val WORD_TYPE = "word"
+    const val LINE_TYPE = "line"
+
+    /**
+     * Largest textSize where multi-line OCR content packs into [box] without wrap:
+     * each line natural width (shrink-only) fits boxW, and N * lineHeight fits boxH.
+     */
+    fun fitPackedFontSizePx(
+        boxWidth: Float,
+        boxHeight: Float,
+        lineCount: Int,
+        minPx: Float = 6f,
+        measureWidth: (Float) -> Float,
+        lineHeight: (Float) -> Float,
+    ): Float {
+        if (lineCount <= 0) return minPx
+        val maxFromH = (boxHeight / lineCount).coerceAtLeast(minPx)
+        return fitFontSizePx(minPx = minPx, maxPx = maxFromH.coerceAtLeast(minPx)) { trial ->
+            val lh = lineHeight(trial)
+            if (lh * lineCount > boxHeight + 0.5f) return@fitFontSizePx false
+            measureWidth(trial) <= boxWidth + 0.5f
+        }
+    }
 }

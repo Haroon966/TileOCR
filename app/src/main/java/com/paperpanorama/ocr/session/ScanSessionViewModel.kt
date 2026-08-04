@@ -23,7 +23,9 @@ import com.paperpanorama.ocr.domain.SavedScan
 import com.paperpanorama.ocr.domain.StitchResult
 import com.paperpanorama.ocr.library.ScanLibrary
 import com.paperpanorama.ocr.ocr.CleanPageRenderer
+import com.paperpanorama.ocr.ocr.GoogleVisionOcrClient
 import com.paperpanorama.ocr.ocr.MistralOcrClient
+import com.paperpanorama.ocr.ocr.OcrLayoutMath
 import com.paperpanorama.ocr.ocr.OcrPdfBuilder
 import com.paperpanorama.ocr.ocr.OcrTextClean
 import com.paperpanorama.ocr.orient.OpenCvFrameNormalizer
@@ -95,6 +97,14 @@ data class ScanUiState(
     val isBuildingBatchPdf: Boolean = false,
     val batchPdfProgress: String = "",
     val batchPdfUri: Uri? = null,
+    /** Google Vision OCR → searchable PDF (original scan image + invisible text layer). */
+    val isRunningVisionOcr: Boolean = false,
+    val visionOcrStatus: String = "",
+    val visionMarkdown: String = "",
+    val visionPdfUri: Uri? = null,
+    /** Clean Verdana layout reference from Vision word boxes. */
+    val visionCleanUri: Uri? = null,
+    val visionOcrError: String? = null,
 )
 
 
@@ -830,7 +840,7 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Call Mistral OCR on current page → white Inter reconstruction → Result screen.
+     * Call Mistral OCR on current page → white Verdana layout (stretched into OCR boxes).
      */
     fun runMistralOcr() {
         if (_state.value.isRunningOcr) return
@@ -885,9 +895,15 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
                         val pageW = _state.value.pageWidth.coerceAtLeast(1)
                         val pageH = _state.value.pageHeight.coerceAtLeast(1)
                         var blocks = apiResult.page.blocks
-                        if (blocks.isEmpty() && apiResult.page.markdown.isNotBlank()) {
+                        val usedFallbackLayout = blocks.isEmpty() && apiResult.page.markdown.isNotBlank()
+                        if (usedFallbackLayout) {
                             blocks = OcrTextClean.markdownFallbackBlocks(apiResult.page.markdown)
+                            navChannel.send(
+                                ScanNavEvent.Snackbar("No box layout from API — layout estimated"),
+                            )
                         }
+                        blocks = OcrLayoutMath.expandMultilineToLineBlocks(blocks)
+                        val pageMarkdown = apiResult.page.markdown
                         val clean = withContext(Dispatchers.Default) {
                             CleanPageRenderer(app).render(
                                 pageW = pageW,
@@ -895,6 +911,7 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
                                 blocks = blocks,
                                 apiPageW = apiResult.page.pageWidth,
                                 apiPageH = apiResult.page.pageHeight,
+                                markdown = pageMarkdown,
                             )
                         }
                         val outDir = File(app.cacheDir, "ocr_clean").also { it.mkdirs() }
@@ -950,6 +967,152 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * Call Google Vision (DOCUMENT_TEXT_DETECTION) on the current page → searchable PDF that
+     * keeps the original scan image visible, with an invisible OCR text layer on top.
+     */
+    fun runGoogleVisionSearchablePdf() {
+        if (_state.value.isRunningVisionOcr) return
+        val page = _state.value.pageUri ?: run {
+            viewModelScope.launch {
+                navChannel.send(ScanNavEvent.Snackbar("No page to OCR"))
+            }
+            return
+        }
+        val key = BuildConfig.GOOGLE_VISION_API_KEY
+        if (key.isBlank()) {
+            viewModelScope.launch {
+                navChannel.send(ScanNavEvent.Snackbar("Set GOOGLE_VISION_API_KEY in .env"))
+            }
+            return
+        }
+        viewModelScope.launch {
+            _state.update {
+                it.copy(
+                    isRunningVisionOcr = true,
+                    visionOcrStatus = "Calling Google Vision…",
+                    visionOcrError = null,
+                    visionPdfUri = null,
+                    visionCleanUri = null,
+                    visionMarkdown = "",
+                )
+            }
+            navChannel.send(ScanNavEvent.ToVisionResult)
+            val app = getApplication<Application>()
+            val path = page.path
+            if (path.isNullOrBlank()) {
+                _state.update {
+                    it.copy(isRunningVisionOcr = false, visionOcrStatus = "", visionOcrError = "Page path missing")
+                }
+                return@launch
+            }
+            val client = GoogleVisionOcrClient(key)
+            val apiResult = client.processJpegFile(File(path))
+            when (apiResult) {
+                is GoogleVisionOcrClient.Result.Err -> {
+                    _state.update {
+                        it.copy(
+                            isRunningVisionOcr = false,
+                            visionOcrStatus = "",
+                            visionOcrError = apiResult.message,
+                        )
+                    }
+                }
+                is GoogleVisionOcrClient.Result.Ok -> {
+                    try {
+                        val outDir = File(app.cacheDir, "ocr_clean").also { it.mkdirs() }
+                        val blocks = apiResult.page.blocks
+                        val usedFallbackLayout = blocks.isEmpty() && apiResult.page.markdown.isNotBlank()
+                        val layoutBlocks = if (usedFallbackLayout) {
+                            navChannel.send(
+                                ScanNavEvent.Snackbar("No box layout from API — layout estimated"),
+                            )
+                            OcrTextClean.markdownFallbackBlocks(apiResult.page.markdown)
+                        } else {
+                            blocks
+                        }
+                        val renderBlocks = OcrLayoutMath.expandMultilineToLineBlocks(layoutBlocks)
+
+                        _state.update { it.copy(visionOcrStatus = "Building clean layout…") }
+                        val pageW = _state.value.pageWidth.coerceAtLeast(1)
+                        val pageH = _state.value.pageHeight.coerceAtLeast(1)
+                        val clean = withContext(Dispatchers.Default) {
+                            CleanPageRenderer(app).render(
+                                pageW = pageW,
+                                pageH = pageH,
+                                blocks = renderBlocks,
+                                apiPageW = apiResult.page.pageWidth,
+                                apiPageH = apiResult.page.pageHeight,
+                            )
+                        }
+                        val cleanFile = File(outDir, "vision_clean_${System.currentTimeMillis()}.jpg")
+                        withContext(Dispatchers.IO) {
+                            cleanFile.outputStream().use { os ->
+                                clean.compress(Bitmap.CompressFormat.JPEG, 92, os)
+                            }
+                        }
+                        clean.recycle()
+
+                        _state.update { it.copy(visionOcrStatus = "Building searchable PDF…") }
+                        val pdfFile = File(outDir, "vision_${System.currentTimeMillis()}.pdf")
+                        withContext(Dispatchers.IO) {
+                            OcrPdfBuilder.buildSearchable(
+                                blocks = blocks,
+                                apiPageW = apiResult.page.pageWidth,
+                                apiPageH = apiResult.page.pageHeight,
+                                originalImageFile = File(path),
+                                outFile = pdfFile,
+                            )
+                        }
+                        _state.update {
+                            it.copy(
+                                isRunningVisionOcr = false,
+                                visionOcrStatus = "",
+                                visionMarkdown = apiResult.page.markdown,
+                                visionPdfUri = if (pdfFile.exists()) Uri.fromFile(pdfFile) else null,
+                                visionCleanUri = if (cleanFile.exists()) Uri.fromFile(cleanFile) else null,
+                                visionOcrError = null,
+                            )
+                        }
+                    } catch (t: Throwable) {
+                        _state.update {
+                            it.copy(
+                                isRunningVisionOcr = false,
+                                visionOcrStatus = "",
+                                visionOcrError = t.message ?: "Could not build searchable PDF",
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fun copyVisionMarkdown(context: Context) {
+        val text = _state.value.visionMarkdown
+        if (text.isBlank()) return
+        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+        cm.setPrimaryClip(android.content.ClipData.newPlainText("OCR", text))
+        viewModelScope.launch {
+            navChannel.send(ScanNavEvent.Snackbar("Copied"))
+        }
+    }
+
+    fun saveVisionPdf() {
+        val uri = _state.value.visionPdfUri ?: return
+        val app = getApplication<Application>()
+        viewModelScope.launch {
+            val pdfFile = uri.path?.let { File(it) } ?: return@launch
+            val name = "TileOCR_Searchable_${System.currentTimeMillis()}.pdf"
+            val saved = withContext(Dispatchers.IO) {
+                MediaSaver.savePdfToDownloads(app, pdfFile, name)
+            }
+            navChannel.send(
+                ScanNavEvent.Snackbar(if (saved != null) "PDF saved to Downloads" else "Could not save PDF"),
+            )
+        }
+    }
+
     fun copyOcrMarkdown(context: Context) {
         val text = _state.value.ocrMarkdown
         if (text.isBlank()) return
@@ -993,7 +1156,11 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun saveActiveImage(isClean: Boolean) {
-        val uri = if (isClean) _state.value.ocrCleanUri else _state.value.pageUri
+        val uri = when {
+            isClean && _state.value.ocrCleanUri != null -> _state.value.ocrCleanUri
+            isClean && _state.value.visionCleanUri != null -> _state.value.visionCleanUri
+            else -> _state.value.pageUri
+        }
         uri ?: return
         val app = getApplication<Application>()
         viewModelScope.launch {
@@ -1050,7 +1217,13 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
                         var blocks = result.page.blocks
                         if (blocks.isEmpty() && result.page.markdown.isNotBlank()) {
                             blocks = OcrTextClean.markdownFallbackBlocks(result.page.markdown)
+                            navChannel.send(
+                                ScanNavEvent.Snackbar(
+                                    "Page ${idx + 1}: no box layout from API — layout estimated",
+                                ),
+                            )
                         }
+                        blocks = OcrLayoutMath.expandMultilineToLineBlocks(blocks)
                         inputs.add(
                             OcrPdfBuilder.PdfPageInput(
                                 blocks = blocks,

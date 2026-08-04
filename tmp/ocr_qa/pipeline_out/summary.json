@@ -1,0 +1,28 @@
+[
+  {
+    "page": "first",
+    "model": "mistral-ocr-4",
+    "blocks": 5,
+    "residuals": 0,
+    "fallback_layout": false,
+    "api_size": [
+      1608,
+      1999
+    ],
+    "clean": "/home/olufsen/ocr/tmp/ocr_qa/pipeline_out/first_clean.jpg",
+    "side": "/home/olufsen/ocr/tmp/ocr_qa/pipeline_out/first_side_by_side.jpg"
+  },
+  {
+    "page": "last",
+    "model": "mistral-ocr-4",
+    "blocks": 1,
+    "residuals": 0,
+    "fallback_layout": false,
+    "api_size": [
+      1561,
+      2000
+    ],
+    "clean": "/home/olufsen/ocr/tmp/ocr_qa/pipeline_out/last_clean.jpg",
+    "side": "/home/olufsen/ocr/tmp/ocr_qa/pipeline_out/last_side_by_side.jpg"
+  }
+]

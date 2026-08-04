@@ -18,10 +18,9 @@ import kotlin.math.roundToInt
  * Builds a high-quality PDF from OCR blocks + original page image.
  *
  * Layout rules:
- *  - Text blocks  → rendered with clean Inter typeface, black on white, exact position.
- *  - Image/figure/equation/chart blocks → cropped pixel-for-pixel from the original image
- *    and placed at the same normalised position in the PDF.
- *  - Everything else (background doodles, margins, etc.) → white.
+ *  - Text blocks  → Verdana (or provided faces) stretched into each bbox, black on white.
+ *  - Image/figure/equation/chart (+ residual) → cropped from the original image at same box.
+ *  - Everything else → white.
  *
  * PDF page is sized at [MIN_LONG_EDGE] px on the long side so it reads well on screen
  * and prints cleanly.
@@ -74,6 +73,7 @@ object OcrPdfBuilder {
             val page = doc.startPage(pageInfo)
             val canvas = page.canvas
             canvas.drawColor(Color.WHITE)
+            val bmpPaint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
 
             for (block in input.blocks) {
                 val box = OcrLayoutMath.normalizeBox(
@@ -95,14 +95,15 @@ object OcrPdfBuilder {
                             box.left.toFloat(), box.top.toFloat(),
                             box.right.toFloat(), box.bottom.toFloat(),
                         )
-                        val paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
-                        canvas.drawBitmap(origBmp, srcRect, dstRect, paint)
+                        canvas.drawBitmap(origBmp, srcRect, dstRect, bmpPaint)
                     }
                 } else {
-                    val cleaned = OcrTextClean.stripMarkdown(block.text)
+                    val cleaned = OcrLayoutMath.stretchText(OcrTextClean.stripMarkdown(block.text))
                     if (cleaned.isBlank()) continue
                     val face = if (OcrLayoutMath.isTitleBlock(block.type)) semiboldTypeface else regularTypeface
-                    drawTextBlock(canvas, cleaned, box, face)
+                    OcrStretchDraw.drawStretchedBlock(
+                        canvas, cleaned, box, face, Color.BLACK, blockType = block.type,
+                    )
                 }
             }
 
@@ -113,70 +114,65 @@ object OcrPdfBuilder {
         doc.close()
     }
 
-    // ── Text rendering ────────────────────────────────────────────────────────
+    // ── Searchable PDF: original image visible, OCR text invisible on top ─────
 
-    private fun drawTextBlock(
-        canvas: Canvas,
-        text: String,
-        box: OcrLayoutMath.PixelBox,
-        typeface: Typeface,
-    ) {
-        val lines = OcrTextClean.lines(text).ifEmpty { listOf(text.trim()) }
-        val paint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.BLACK
-            this.typeface = typeface
-        }
-        val maxH = (box.height * 0.95f / lines.size.coerceAtLeast(1)).coerceAtLeast(8f)
-        val fitSize = OcrLayoutMath.fitFontSizePx(
-            minPx = 8f,
-            maxPx = maxH.coerceAtMost(box.width.toFloat()),
-        ) { trial ->
-            paint.textSize = trial
-            val lh = paint.fontSpacing
-            if (lh * lines.size > box.height + 0.5f) return@fitFontSizePx false
-            lines.all { paint.measureText(it) <= box.width + 0.5f }
-        }
-        paint.textSize = fitSize
+    data class SearchablePageInput(
+        val blocks: List<OcrBlock>,
+        val apiPageW: Int,
+        val apiPageH: Int,
+        val originalImageFile: File,
+    )
 
-        // Re-wrap lines that overflow at the final size
-        val wrapped = lines.flatMap { line ->
-            if (paint.measureText(line) <= box.width) listOf(line)
-            else wrapLine(line, paint, box.width)
-        }
+    fun buildSearchable(
+        blocks: List<OcrBlock>,
+        apiPageW: Int,
+        apiPageH: Int,
+        originalImageFile: File,
+        outFile: File,
+    ) = buildSearchableMultiPage(
+        pages = listOf(SearchablePageInput(blocks, apiPageW, apiPageH, originalImageFile)),
+        outFile = outFile,
+    )
 
-        val finalSize = OcrLayoutMath.fitFontSizePx(minPx = 8f, maxPx = fitSize) { trial ->
-            paint.textSize = trial
-            paint.fontSpacing * wrapped.size <= box.height + 0.5f
-        }
-        paint.textSize = finalSize
+    /**
+     * Page = the original scan pixel-for-pixel (visible), with each OCR word drawn again on top
+     * at zero alpha, stretched to its own bounding box. The glyphs are real PDF text — searchable
+     * and selectable — but fully transparent, so the page still looks exactly like the scan.
+     */
+    fun buildSearchableMultiPage(pages: List<SearchablePageInput>, outFile: File) {
+        val doc = PdfDocument()
+        pages.forEachIndexed { pageIdx, input ->
+            val origBmp = loadScaled(input.originalImageFile, 3000) ?: return@forEachIndexed
+            val pdfW = origBmp.width
+            val pdfH = origBmp.height
 
-        val lh = paint.fontSpacing
-        val tops = OcrLayoutMath.lineTops(box.top, box.height, wrapped.size, lh)
-        val fm = paint.fontMetrics
-        for (i in wrapped.indices) {
-            canvas.drawText(wrapped[i], box.left.toFloat(), tops[i] - fm.ascent, paint)
-        }
-    }
+            val pageInfo = PdfDocument.PageInfo.Builder(pdfW, pdfH, pageIdx + 1).create()
+            val page = doc.startPage(pageInfo)
+            val canvas = page.canvas
+            canvas.drawBitmap(
+                origBmp,
+                Rect(0, 0, pdfW, pdfH),
+                RectF(0f, 0f, pdfW.toFloat(), pdfH.toFloat()),
+                Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG),
+            )
 
-    private fun wrapLine(line: String, paint: TextPaint, width: Int): List<String> {
-        val words = line.split(Regex("\\s+")).filter { it.isNotEmpty() }
-        if (words.isEmpty()) return listOf(line)
-        val out = mutableListOf<String>()
-        var cur = StringBuilder()
-        for (w in words) {
-            val trial = if (cur.isEmpty()) w else "$cur $w"
-            if (paint.measureText(trial) <= width) {
-                cur = StringBuilder(trial)
-            } else {
-                if (cur.isNotEmpty()) out.add(cur.toString())
-                cur = StringBuilder(w)
+            val invisible = TextPaint(Paint.ANTI_ALIAS_FLAG).apply { alpha = 0 }
+            for (block in input.blocks) {
+                val text = OcrLayoutMath.stretchText(block.text)
+                if (text.isEmpty()) continue
+                val box = OcrLayoutMath.normalizeBox(
+                    block.left, block.top, block.right, block.bottom,
+                    pdfW, pdfH, input.apiPageW, input.apiPageH,
+                )
+                OcrStretchDraw.drawStretchedLine(canvas, text, box, invisible)
             }
-        }
-        if (cur.isNotEmpty()) out.add(cur.toString())
-        return out.ifEmpty { listOf(line) }
-    }
 
-    // ── Bitmap helpers ────────────────────────────────────────────────────────
+            doc.finishPage(page)
+            origBmp.recycle()
+        }
+        outFile.outputStream().buffered().use { doc.writeTo(it) }
+        doc.close()
+    }
 
     private fun loadScaled(file: File, maxEdge: Int): Bitmap? {
         val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }

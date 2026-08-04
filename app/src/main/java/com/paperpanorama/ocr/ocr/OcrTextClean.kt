@@ -49,6 +49,19 @@ object OcrTextClean {
             .filter { it.isNotEmpty() }
 
     /**
+     * Common Latin OCR name typos (essay pages + plan pages).
+     * ponytail: small alias table; ceiling = known misspellings; upgrade = user dictionary.
+     */
+    fun fixCommonTypos(raw: String): String {
+        if (raw.isBlank()) return raw
+        return raw
+            .replace(Regex("""\bShaab\b"""), "Shoaib")
+            .replace(Regex("""\bshaab\b"""), "shoaib")
+            .replace(Regex("""\bMahnour\b"""), "Mahnoor")
+            .replace(Regex("""\bmahnour\b"""), "mahnoor")
+    }
+
+    /**
      * When OCR returns markdown but no blocks: stack paragraphs as full-width strips.
      * Returns normalized [0,1] boxes top→bottom with side margins.
      */

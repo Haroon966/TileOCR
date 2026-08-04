@@ -1,0 +1,5 @@
+{
+  "gold": "tmp/ocr_qa/pipeline_out/last_clean_GOLD.jpg",
+  "app": "Mistral Run OCR expands multiline\u2192line bands + Verdana fit (left-aligned)",
+  "note": "User locked last_clean as final look for app Mistral path"
+}

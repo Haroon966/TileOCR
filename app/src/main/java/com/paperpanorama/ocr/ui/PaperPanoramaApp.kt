@@ -219,6 +219,11 @@ fun PaperPanoramaApp(
                         launchSingleTop = true
                     }
                 }
+                ScanNavEvent.ToVisionResult -> {
+                    navController.navigate(Destinations.VisionResult.route) {
+                        launchSingleTop = true
+                    }
+                }
                 ScanNavEvent.RequestPermission -> {
                     if (shouldShowRationale()) {
                         showPermissionRationale = true
@@ -358,6 +363,7 @@ fun PaperPanoramaApp(
                     onDownload = viewModel::downloadPageImage,
                     onRotate = viewModel::rotateOcrPage,
                     onOcr = viewModel::runMistralOcr,
+                    onSearchablePdf = viewModel::runGoogleVisionSearchablePdf,
                     onRetake = viewModel::retake,
                     onDelete = viewModel::deleteLibraryScanFromViewer,
                     onBack = {
@@ -385,6 +391,24 @@ fun PaperPanoramaApp(
                     onExportPdf = viewModel::saveOcrPdf,
                     pdfReady = state.ocrPdfUri != null,
                     onRetry = viewModel::runMistralOcr,
+                    onBack = {
+                        navController.popBackStack()
+                    },
+                )
+            }
+            composable(Destinations.VisionResult.route) {
+                OcrResultScreen(
+                    pageUri = state.pageUri,
+                    cleanUri = state.visionCleanUri,
+                    markdown = state.visionMarkdown,
+                    isRunning = state.isRunningVisionOcr,
+                    status = state.visionOcrStatus,
+                    error = state.visionOcrError,
+                    onCopy = { viewModel.copyVisionMarkdown(context) },
+                    onSave = { isClean -> viewModel.saveActiveImage(isClean) },
+                    onExportPdf = viewModel::saveVisionPdf,
+                    pdfReady = state.visionPdfUri != null,
+                    onRetry = viewModel::runGoogleVisionSearchablePdf,
                     onBack = {
                         navController.popBackStack()
                     },

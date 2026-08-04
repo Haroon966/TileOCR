@@ -27,6 +27,7 @@ import androidx.compose.material.icons.outlined.Crop
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.DocumentScanner
 import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.PictureAsPdf
 import androidx.compose.material.icons.outlined.Rotate90DegreesCcw
 import androidx.compose.material.icons.outlined.TextFields
 import androidx.compose.material3.AlertDialog
@@ -86,6 +87,7 @@ fun OcrReadyScreen(
     onDownload: () -> Unit,
     onRotate: () -> Unit,
     onOcr: () -> Unit,
+    onSearchablePdf: () -> Unit,
     onRetake: () -> Unit,
     onDelete: (String) -> Unit,
     onBack: () -> Unit,
@@ -254,6 +256,41 @@ fun OcrReadyScreen(
                             style = MaterialTheme.typography.titleMedium,
                             color = Ink,
                             fontWeight = FontWeight.Bold,
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // ── SECONDARY CTA: Searchable PDF (Google Vision) ───────────
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(androidx.compose.ui.graphics.Color.White.copy(alpha = if (pageReady && toolsEnabled) 0.08f else 0.04f))
+                        .clickable(enabled = pageReady && toolsEnabled, onClick = onSearchablePdf)
+                        .padding(vertical = 12.dp)
+                        .semantics { contentDescription = "Searchable PDF" },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        val tint = androidx.compose.ui.graphics.Color.White.copy(
+                            alpha = if (pageReady && toolsEnabled) 0.85f else 0.3f,
+                        )
+                        Icon(
+                            imageVector = Icons.Outlined.PictureAsPdf,
+                            contentDescription = null,
+                            tint = tint,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Text(
+                            text = "Searchable PDF (Google Vision)",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = tint,
                         )
                     }
                 }
