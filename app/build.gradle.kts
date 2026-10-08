@@ -4,6 +4,22 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+fun readEnvKey(name: String): String {
+    val envFile = rootProject.file(".env")
+    if (!envFile.isFile) return ""
+    return envFile.readLines()
+        .map { it.trim() }
+        .filter { it.isNotEmpty() && !it.startsWith("#") }
+        .firstOrNull { it.startsWith("$name=") }
+        ?.substringAfter("=")
+        ?.trim()
+        ?.trim('"')
+        .orEmpty()
+}
+
+val mistralApiKey: String = readEnvKey("mistral_api_key")
+val googleVisionApiKey: String = readEnvKey("GOOGLE_VISION_API_KEY")
+
 android {
     namespace = "com.paperpanorama.ocr"
     compileSdk = 35
@@ -13,11 +29,14 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = 3
-        versionName = "0.3.0-ocr-ready"
+        versionName = "0.4.0-ocr"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
+        buildConfigField("String", "MISTRAL_API_KEY", "\"${mistralApiKey.replace("\"", "\\\"")}\"")
+        buildConfigField("String", "GOOGLE_VISION_API_KEY", "\"${googleVisionApiKey.replace("\"", "\\\"")}\"")
+
         ndk {
-            // Phone is arm64; skip unused ABIs + drop ORT until OCR phase.
+            // Phone is arm64; skip unused ABIs.
             abiFilters += listOf("arm64-v8a")
         }
     }
@@ -43,6 +62,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     packaging {
@@ -52,8 +72,8 @@ android {
     }
 
     androidResources {
-        // Keep the segmentation model uncompressed so it can be memory-mapped.
-        noCompress += "tflite"
+        // Keep models uncompressed so they can be memory-mapped.
+        noCompress += listOf("tflite")
     }
 }
 
@@ -72,6 +92,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("androidx.exifinterface:exifinterface:1.3.7")
     implementation("io.coil-kt:coil-compose:2.7.0")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
@@ -82,10 +103,14 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:1.4.0")
     implementation("androidx.camera:camera-view:1.4.0")
 
+    // Google ML Kit Document Scanner (Play services UI; up to 4 pages).
+    implementation("com.google.android.gms:play-services-mlkit-document-scanner:16.0.0")
+
     implementation("org.opencv:opencv:4.9.0")
     implementation("org.tensorflow:tensorflow-lite:2.16.1")
 
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")

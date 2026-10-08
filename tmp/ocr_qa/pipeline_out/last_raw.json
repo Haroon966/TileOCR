@@ -1,0 +1,36 @@
+{
+  "pages": [
+    {
+      "index": 0,
+      "markdown": "Birech DMD\nTask -> Data fetching, Translation, Mapping.\nOwners Hatay (day 1) Shoaib (2 days) Hatay (3 days)\nMain App (Shoaib)\nDependencies\nPlan (UI)\nweb App (QA overall)\nData fetching (QA)\nTranslation (QA required) here\nMapping (QA)\n1- Data fetching [1]\n2- Parallel -> Translation [2]\nMapping [2, 3, 4]\n3- Translation (Q2A) (Mahnour) [3]\nMapping (QAA) (IQRA) [5]\n[3, 7] web App (Regression Testing whole by team member)",
+      "images": [],
+      "tables": [],
+      "hyperlinks": [],
+      "header": null,
+      "footer": null,
+      "dimensions": {
+        "dpi": 200,
+        "height": 2000,
+        "width": 1561
+      },
+      "confidence_scores": null,
+      "blocks": [
+        {
+          "top_left_x": 0,
+          "top_left_y": 0,
+          "bottom_right_x": 1559,
+          "bottom_right_y": 1998,
+          "content": "Birech DMD\nTask -> Data fetching, Translation, Mapping.\nOwners Hatay (day 1) Shoaib (2 days) Hatay (3 days)\nMain App (Shoaib)\nDependencies\nPlan (UI)\nweb App (QA overall)\nData fetching (QA)\nTranslation (QA required) here\nMapping (QA)\n1- Data fetching [1]\n2- Parallel -> Translation [2]\nMapping [2, 3, 4]\n3- Translation (Q2A) (Mahnour) [3]\nMapping (QAA) (IQRA) [5]\n[3, 7] web App (Regression Testing whole by team member)",
+          "confidence_scores": null,
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "model": "mistral-ocr-4",
+  "document_annotation": null,
+  "usage_info": {
+    "pages_processed": 1,
+    "doc_size_bytes": 544702
+  }
+}

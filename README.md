@@ -1,25 +1,22 @@
 # TileOCR
 
-Android app that captures paper via **guided multi-tile / panorama** scanning, stitches and flattens the page, then runs **English + Urdu OCR** (offline-first).
+Android app that captures paper via **guided multi-tile / panorama** scanning, stitches and flattens the page, and keeps scans in a private local library.
 
 **Repo:** [github.com/Haroon966/TileOCR](https://github.com/Haroon966/TileOCR)
 
 ## Problem
 
-- A single phone photo of an A4 / legal / notebook page is often too low-res, skewed, or glare-lit for reliable OCR.
+- A single phone photo of an A4 / legal / notebook page is often too low-res, skewed, or glare-lit.
 - Large or dense pages need close-up shots; stitching those tiles into one page is missing from most scanner apps.
-- Urdu (especially Nastaliq) and bilingual EN+UR pages are poorly handled by Latin-only engines.
-- Many scanners push cloud-only OCR with no solid offline path.
 
 ## Solution
 
 **TileOCR** is a camera-first Android pipeline:
 
-1. Capture overlapping **tiles** of one page (or a single shot).
+1. Capture overlapping **tiles** of one page (or a single shot / ML Kit document scan).
 2. **Stitch** them into one high-res mosaic (OpenCV document scans mode).
-3. Detect edges, warp flat, and enhance for readable text.
-4. Run **English + Urdu OCR** on-device first; optional cloud/VLM only with consent.
-5. Edit, export, and keep scans in a private local library.
+3. Detect edges, warp flat, and enhance for readability.
+4. Save pages in a private local library (crop / rotate / rescan).
 
 ## Features (current)
 
@@ -27,20 +24,16 @@ Android app that captures paper via **guided multi-tile / panorama** scanning, s
 - OpenCV document stitch (`SCANS` / affine path) with progress and failure fallback
 - Edge detect, corner drag, perspective warp, enhance presets
 - Local scan library (save / open / delete)
-- Compose UI: Home → Camera → Stitch → Prepare → Result
-
-OCR model wiring (PaddleOCR ONNX) is still in progress — see the PRD phases.
+- Compose UI: Home → Camera → Stitch → Prepare → Page view
 
 ## Stack
 
 | Layer | Choice |
 |-------|--------|
 | UI | Kotlin, Jetpack Compose, Material 3 |
-| Camera | CameraX |
+| Camera | CameraX / ML Kit Document Scanner |
 | CV / stitch | OpenCV (`Stitcher::SCANS`) |
 | Paper mask | U²-Net lite (`u2netp.tflite` in assets) |
-| On-device OCR | PaddleOCR via ONNX Runtime (planned) |
-| Optional quality | Cloud / VLM for hard Nastaliq (opt-in) |
 
 ## Requirements
 
@@ -56,25 +49,6 @@ OCR model wiring (PaddleOCR ONNX) is still in progress — see the PRD phases.
 4. Run.
 
 `local.properties` is gitignored — Android Studio creates it with your SDK path.
-
-## Project layout
-
-```text
-PRD.md
-docs/
-  RESEARCH.md
-  FEATURE_REQUIREMENTS.md
-app/
-  src/main/java/com/paperpanorama/ocr/   # applicationId (legacy package; display name is TileOCR)
-settings.gradle.kts
-build.gradle.kts
-```
-
-## Docs
-
-1. [PRD.md](PRD.md) — product vision and success metrics  
-2. [docs/RESEARCH.md](docs/RESEARCH.md) — repos, papers, models  
-3. [docs/FEATURE_REQUIREMENTS.md](docs/FEATURE_REQUIREMENTS.md) — P0/P1/P2 features  
 
 ## License
 

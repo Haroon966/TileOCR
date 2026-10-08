@@ -8,6 +8,7 @@ import android.net.Uri
 import androidx.exifinterface.media.ExifInterface
 import com.paperpanorama.ocr.domain.CaptureFrame
 import com.paperpanorama.ocr.stitch.OpenCvBootstrap
+import com.paperpanorama.ocr.util.BitmapDecode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.opencv.core.Core
@@ -31,7 +32,39 @@ class OpenCvFrameNormalizer(
     override suspend fun normalizeForStitch(frame: CaptureFrame): CaptureFrame =
         withContext(Dispatchers.Default) {
             val path = pathOf(frame.uri) ?: return@withContext frame
-            val bitmap = decodeWithExif(path) ?: return@withContext frame
+            val exifOrient = runCatching {
+                ExifInterface(path).getAttributeInt(
+                    ExifInterface.TAG_ORIENTATION,
+                    ExifInterface.ORIENTATION_NORMAL,
+                )
+            }.getOrDefault(ExifInterface.ORIENTATION_NORMAL)
+            val exifNeedsBake = exifOrient != ExifInterface.ORIENTATION_NORMAL &&
+                exifOrient != ExifInterface.ORIENTATION_UNDEFINED
+            val deviceRot = if (!exifNeedsBake) {
+                OrientationMath.displayRotationToDegrees(frame.displayRotation)
+            } else {
+                0
+            }
+            val bounds = BitmapDecode.bounds(path)
+            val alreadySmall = bounds != null &&
+                max(bounds.first, bounds.second) <= STITCH_LONG_EDGE
+            // Already upright + within stitch working size — skip decode/re-JPEG.
+            if (!exifNeedsBake && deviceRot == 0 && alreadySmall) {
+                return@withContext frame.copy(
+                    displayRotation = 0,
+                    exifOrientation = ExifInterface.ORIENTATION_NORMAL,
+                )
+            }
+            var bitmap = decodeWithExif(path, STITCH_LONG_EDGE) ?: return@withContext frame
+            // EXIF first; if missing, apply CameraX Surface.ROTATION_* (or degrees).
+            if (!exifNeedsBake && deviceRot != 0) {
+                val matrix = Matrix().apply { postRotate(deviceRot.toFloat()) }
+                val turned = Bitmap.createBitmap(
+                    bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true,
+                )
+                if (turned != bitmap) bitmap.recycle()
+                bitmap = turned
+            }
             val w = bitmap.width
             val h = bitmap.height
             val outFile = File(path).parentFile?.resolve("norm_${frame.index}.jpg")
@@ -42,6 +75,7 @@ class OpenCvFrameNormalizer(
                 uri = Uri.fromFile(outFile),
                 width = w,
                 height = h,
+                displayRotation = 0,
                 exifOrientation = ExifInterface.ORIENTATION_NORMAL,
             )
         }
@@ -118,9 +152,8 @@ class OpenCvFrameNormalizer(
         }
     }
 
-    private fun decodeWithExif(path: String): Bitmap? {
-        val options = BitmapFactory.Options().apply { inJustDecodeBounds = false }
-        val raw = BitmapFactory.decodeFile(path, options) ?: return null
+    private fun decodeWithExif(path: String, maxLongEdge: Int = STITCH_LONG_EDGE): Bitmap? {
+        val raw = BitmapDecode.decodeDownsampled(path, maxLongEdge) ?: return null
         val exif = runCatching { ExifInterface(path) }.getOrNull()
         val orientation = exif?.getAttributeInt(
             ExifInterface.TAG_ORIENTATION,
@@ -237,5 +270,7 @@ class OpenCvFrameNormalizer(
 
     companion object {
         private const val SCORE_LONG_EDGE = 1200
+        /** Cap normalize decode — stitch work edge is at or below this. */
+        private const val STITCH_LONG_EDGE = 2200
     }
 }

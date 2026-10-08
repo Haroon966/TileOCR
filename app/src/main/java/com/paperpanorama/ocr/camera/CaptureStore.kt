@@ -27,6 +27,18 @@ class CaptureStore(private val context: Context) {
         sessionDir(sessionId).deleteRecursively()
     }
 
+    /** Copy ML Kit / content URIs into the session cache as tile JPEGs. */
+    fun importPageUris(sessionId: String, uris: List<Uri>): List<CaptureFrame> {
+        val dir = sessionDir(sessionId)
+        return uris.mapIndexed { index, uri ->
+            val dest = File(dir, "tile_%02d.jpg".format(index))
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                dest.outputStream().use { output -> input.copyTo(output) }
+            } ?: error("Could not read scanned page $index")
+            frameFromFile(index, dest, displayRotation = 0)
+        }
+    }
+
     fun frameFromFile(
         index: Int,
         file: File,

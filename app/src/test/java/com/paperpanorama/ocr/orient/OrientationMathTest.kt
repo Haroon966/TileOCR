@@ -35,4 +35,15 @@ class OrientationMathTest {
         assertEquals(180, OrientationMath.snapToCardinal(170.0))
         assertEquals(270, OrientationMath.snapToCardinal(260.0))
     }
+
+    @Test
+    fun displayRotationToDegrees_surfaceAndDegrees() {
+        assertEquals(0, OrientationMath.displayRotationToDegrees(0))
+        assertEquals(90, OrientationMath.displayRotationToDegrees(1))
+        assertEquals(180, OrientationMath.displayRotationToDegrees(2))
+        assertEquals(270, OrientationMath.displayRotationToDegrees(3))
+        assertEquals(90, OrientationMath.displayRotationToDegrees(90))
+        assertEquals(180, OrientationMath.displayRotationToDegrees(180))
+        assertEquals(270, OrientationMath.displayRotationToDegrees(270))
+    }
 }

@@ -1,0 +1,99 @@
+{
+  "generated": "2026-08-04T00:27:24",
+  "model": "mistral-ocr-4",
+  "first": {
+    "ok": true,
+    "latency_s": null,
+    "blocks": 5,
+    "score": "10/10",
+    "score_pct": 100,
+    "checks": [
+      {
+        "id": "date",
+        "pass": true
+      },
+      {
+        "id": "grade",
+        "pass": true
+      },
+      {
+        "id": "subject",
+        "pass": true
+      },
+      {
+        "id": "name_raw_shaab_or_shoaib",
+        "pass": true
+      },
+      {
+        "id": "name_fixed_shoaib",
+        "pass": true
+      },
+      {
+        "id": "doctor",
+        "pass": true
+      },
+      {
+        "id": "primary_school",
+        "pass": true
+      },
+      {
+        "id": "urdu_word",
+        "pass": true
+      },
+      {
+        "id": "pakistan",
+        "pass": true
+      },
+      {
+        "id": "arabic_present",
+        "pass": true
+      }
+    ],
+    "preview": "Date: 30/7/26\nGrade: 5\nSubject: English\n\nMy self\nMy name is Shoaib (معي) I am\n24 years old. I read in\nclass Five. I study in the\nGovernment Primary School in\nmy town. My favorite subject\nis Urdu. I want to be\na doctor in future. I like\nto play video games in\nmy free Time. I love Pakistan\nArmy.\n\nصبر المحارف\n\nمعاون : ادو\nتاريخ : 30-07-2026\n\nصبر نام شعيب - صبري خضر 24 سال - صبري\nبا خوض ماست صبري يمر صبري يمر\nالقول صبري يمر صبري يمر - صبري يمر صبري يمر\nصبري يمر يمر - صبري يمر صبري يمر\nصبري يمر يمر - صبري يمر صبري يمر",
+    "clean": "/home/olufsen/ocr/tmp/ocr_qa/pipeline_out/first_clean.jpg",
+    "side_by_side": "/home/olufsen/ocr/tmp/ocr_qa/pipeline_out/first_side_by_side.jpg"
+  },
+  "last": {
+    "ok": true,
+    "latency_s": null,
+    "blocks": 1,
+    "raw_structure_score": "7/7",
+    "raw_structure_pct": 100,
+    "checks_raw": [
+      {
+        "id": "looks_like_plan",
+        "pass": true
+      },
+      {
+        "id": "has_task",
+        "pass": true
+      },
+      {
+        "id": "has_owners",
+        "pass": true
+      },
+      {
+        "id": "has_parallel",
+        "pass": true
+      },
+      {
+        "id": "has_mapping",
+        "pass": true
+      },
+      {
+        "id": "has_regression",
+        "pass": true
+      },
+      {
+        "id": "canon_engine",
+        "pass": true
+      }
+    ],
+    "preview_raw": "Birech DMD\nTask -> Data fetching, Translation, Mapping.\nOwners Hatay (day 1) Shoaib (2 days) Hatay (3 days)\nMain App (Shoaib)\nDependencies\nPlan (UI)\nweb App (QA overall)\nData fetching (QA)\nTranslation (QA required) here\nMapping (QA)\n1- Data fetching [1]\n2- Parallel -> Translation [2]\nMapping [2, 3, 4]\n3- Translation (Q2A) (Mahnour) [3]\nMapping (QAA) (IQRA) [5]\n[3, 7] web App (Regression Testing whole by team member)",
+    "plan_detected": true,
+    "canon_applied": true,
+    "clean": "/home/olufsen/ocr/tmp/ocr_qa/pipeline_out/last_clean.jpg",
+    "side_by_side": "/home/olufsen/ocr/tmp/ocr_qa/pipeline_out/last_side_by_side.jpg",
+    "triple": "/home/olufsen/ocr/tmp/ocr_qa/pipeline_out/last_triple_compare.jpg"
+  }
+}
