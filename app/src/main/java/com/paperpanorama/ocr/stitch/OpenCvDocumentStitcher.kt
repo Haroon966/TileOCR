@@ -54,7 +54,7 @@ import kotlin.math.sqrt
 class OpenCvDocumentStitcher(
     private val context: Context,
     private val normalizer: FrameNormalizer,
-    private val matchLongEdge: Int = 1400,
+    private val matchLongEdge: Int = 1100,
 ) : DocumentStitcher {
 
     /**
@@ -181,7 +181,27 @@ class OpenCvDocumentStitcher(
             val mosaics = ArrayList<Mat>()
             var droppedTiles = 0
             try {
+                // Same-page ML Kit re-shots: if we never built a multi-tile mosaic,
+                // keep the largest tile (first seed is often a partial crop).
+                val multiJoined = components.any { it.size > 1 }
+                if (samePage && !multiJoined) {
+                    val bestIdx = entries.indices
+                        .filter { entries[it] != null }
+                        .maxByOrNull {
+                            entries[it]!!.mat.rows().toLong() * entries[it]!!.mat.cols()
+                        }
+                    if (bestIdx != null) {
+                        mosaics.add(entries[bestIdx]!!.mat.clone())
+                        droppedTiles = entries.count { it != null } - 1
+                        android.util.Log.i(
+                            TIMING_TAG,
+                            "same-page dups — keep largest tile=$bestIdx " +
+                                "${entries[bestIdx]!!.mat.cols()}x${entries[bestIdx]!!.mat.rows()}",
+                        )
+                    }
+                }
                 for ((ci, group) in components.withIndex()) {
+                    if (mosaics.isNotEmpty() && samePage && !multiJoined) break
                     if (group.isEmpty()) continue
                     onProgress(0.55f + 0.15f * ci / components.size.coerceAtLeast(1), "Compositing group ${ci + 1}…")
                     if (group.size == 1) {
@@ -248,16 +268,10 @@ class OpenCvDocumentStitcher(
                 }
 
                 onProgress(0.72f, "Building final page…")
-                val combined = if (mosaics.size == 1) {
-                    mosaics[0]
-                } else {
-                    val stacked = stackPages(mosaics)
-                    mosaics.forEach { it.release() }
-                    if (stacked == null) {
-                        releaseAllState()
-                        return@withContext failWithBest(frames, "Stitch produced empty mosaic")
-                    }
-                    stacked
+                val combined = combineMosaicsOrBest(mosaics)
+                if (combined == null) {
+                    releaseAllState()
+                    return@withContext failWithBest(frames, "Stitch produced empty mosaic")
                 }
                 releaseAllState()
                 finishMosaic(combined, frames, droppedTiles, onProgress)
@@ -325,13 +339,22 @@ class OpenCvDocumentStitcher(
                 checkCancel()
                 for (i in 0 until frameCount) {
                     if (claimed[i] || entries[i] == null) continue
-                    val match = bestAnchorMatch(entries[i]!!, group, entries, transforms) ?: continue
-                    transforms[i]?.release()
-                    transforms[i] = match
-                    claimed[i] = true
-                    group.add(i)
-                    progressed = true
-                    android.util.Log.i(TIMING_TAG, "tile $i joined component seed=$seed")
+                    val match = bestAnchorMatch(entries[i]!!, group, entries, transforms)
+                    when {
+                        match.h != null -> {
+                            transforms[i]?.release()
+                            transforms[i] = match.h
+                            claimed[i] = true
+                            group.add(i)
+                            progressed = true
+                            android.util.Log.i(TIMING_TAG, "tile $i joined component seed=$seed")
+                        }
+                        match.nearDuplicate -> {
+                            // Same page re-shot — drop; do not start a new stacked page.
+                            claimed[i] = true
+                            android.util.Log.i(TIMING_TAG, "tile $i dropped near-duplicate of seed=$seed")
+                        }
+                    }
                 }
             }
             return group
@@ -349,25 +372,55 @@ class OpenCvDocumentStitcher(
                 val primary = components[0].toMutableList()
                 for (i in 0 until frameCount) {
                     if (claimed[i] || entries[i] == null) continue
-                    val match = bestAnchorMatch(entries[i]!!, primary, entries, transforms) ?: continue
-                    transforms[i]?.release()
-                    transforms[i] = match
-                    claimed[i] = true
-                    primary.add(i)
-                    progressed = true
-                    android.util.Log.i(TIMING_TAG, "tile $i recovered into primary")
+                    val match = bestAnchorMatch(entries[i]!!, primary, entries, transforms)
+                    when {
+                        match.h != null -> {
+                            transforms[i]?.release()
+                            transforms[i] = match.h
+                            claimed[i] = true
+                            primary.add(i)
+                            progressed = true
+                            android.util.Log.i(TIMING_TAG, "tile $i recovered into primary")
+                        }
+                        match.nearDuplicate -> {
+                            claimed[i] = true
+                            android.util.Log.i(TIMING_TAG, "tile $i dropped near-duplicate of primary")
+                        }
+                    }
                 }
                 components[0] = primary
             }
         }
 
-        // Extra components for remaining unmatched tiles.
+        // Extra components for remaining unmatched tiles (true multi-page only).
         while (true) {
             val seed = (0 until frameCount).firstOrNull { !claimed[it] && entries[it] != null } ?: break
+            val claimedIdx = claimed.indices.filter { claimed[it] && entries[it] != null }
+            if (claimedIdx.isNotEmpty()) {
+                val againstPlaced = bestAnchorMatch(entries[seed]!!, claimedIdx, entries, transforms)
+                if (againstPlaced.nearDuplicate) {
+                    againstPlaced.h?.release()
+                    claimed[seed] = true
+                    android.util.Log.i(TIMING_TAG, "tile $seed dropped near-duplicate before new component")
+                    continue
+                }
+                if (againstPlaced.h != null) {
+                    // Should have joined primary; claim into first component.
+                    transforms[seed]?.release()
+                    transforms[seed] = againstPlaced.h
+                    claimed[seed] = true
+                    components[0] = components[0] + seed
+                    android.util.Log.i(TIMING_TAG, "tile $seed late-joined primary")
+                    continue
+                }
+            }
             components.add(growFromSeed(seed))
         }
         return components
     }
+
+    /** Join with homography, or mark as near-duplicate of an already-placed tile. */
+    private data class AnchorMatch(val h: Mat?, val nearDuplicate: Boolean)
 
     /**
      * Pick the anchor with the strongest transform (most inliers), not merely the
@@ -378,25 +431,42 @@ class OpenCvDocumentStitcher(
         placed: List<Int>,
         entries: Array<TileEntry?>,
         transforms: Array<Mat?>,
-    ): Mat? {
+    ): AnchorMatch {
         val recentFirst = placed.asReversed().take(NEIGHBOR_WINDOW)
         val older = placed.asReversed().drop(NEIGHBOR_WINDOW)
         var bestH: Mat? = null
         var bestScore = -1
-        for (j in recentFirst + older) {
-            val scored = pairHomographyScored(entries[j]!!, entry) ?: continue
-            if (scored.inliers > bestScore) {
-                bestH?.release()
-                bestScore = scored.inliers
-                val composed = Mat()
-                Core.gemm(transforms[j]!!, scored.h, 1.0, Mat(), 0.0, composed)
-                scored.h.release()
-                bestH = composed
-            } else {
-                scored.h.release()
+        var sawNearDup = false
+
+        fun consider(j: Int) {
+            when (val scored = pairHomographyScored(entries[j]!!, entry)) {
+                null -> Unit
+                is PairOutcome.NearDuplicate -> sawNearDup = true
+                is PairOutcome.Align -> {
+                    if (scored.inliers > bestScore) {
+                        bestH?.release()
+                        bestScore = scored.inliers
+                        val composed = Mat()
+                        Core.gemm(transforms[j]!!, scored.h, 1.0, Mat(), 0.0, composed)
+                        scored.h.release()
+                        bestH = composed
+                    } else {
+                        scored.h.release()
+                    }
+                }
             }
         }
-        return bestH
+
+        for (j in recentFirst) {
+            consider(j)
+            // Strong recent neighbor — skip older tiles.
+            if (bestScore >= MIN_INLIERS) break
+        }
+        if (bestScore < MIN_INLIERS) {
+            for (j in older) consider(j)
+        }
+        if (bestH != null) return AnchorMatch(bestH, nearDuplicate = false)
+        return AnchorMatch(null, nearDuplicate = sawNearDup)
     }
 
     private suspend fun failWithBest(frames: List<CaptureFrame>, reason: String): StitchResult {
@@ -462,12 +532,15 @@ class OpenCvDocumentStitcher(
         return feats
     }
 
-    private data class ScoredH(val h: Mat, val inliers: Int)
+    private sealed class PairOutcome {
+        data class Align(val h: Mat, val inliers: Int) : PairOutcome()
+        data object NearDuplicate : PairOutcome()
+    }
 
     /**
      * Homography (or affine→H) mapping [next]'s full-resolution coords into [base]'s.
      */
-    private fun pairHomographyScored(base: TileEntry, next: TileEntry): ScoredH? {
+    private fun pairHomographyScored(base: TileEntry, next: TileEntry): PairOutcome? {
         val t = android.os.SystemClock.elapsedRealtime()
         try {
             return pairHomographyInner(base, next)
@@ -479,7 +552,7 @@ class OpenCvDocumentStitcher(
         }
     }
 
-    private fun pairHomographyInner(base: TileEntry, next: TileEntry): ScoredH? {
+    private fun pairHomographyInner(base: TileEntry, next: TileEntry): PairOutcome? {
         val baseFeats = base.feats
         val nextFeats = next.feats
         val normType = if (baseFeats.isOrb) Core.NORM_HAMMING else Core.NORM_L2
@@ -529,7 +602,7 @@ class OpenCvDocumentStitcher(
                 Calib3d.RANSAC,
                 ransacThreshold,
                 inliers,
-                5000,
+                2000,
                 0.995,
             )
             val inl = Core.countNonZero(inliers)
@@ -549,7 +622,7 @@ class OpenCvDocumentStitcher(
                 inliers,
                 Calib3d.RANSAC,
                 4.0,
-                3000,
+                2000,
                 0.99,
                 10,
             )
@@ -597,18 +670,18 @@ class OpenCvDocumentStitcher(
             hom.release()
             return null
         }
-        // Reject near-duplicate alignment (same page re-shot) — causes vertical
-        // mis-stitches when a tiny bogus ty slips through.
+        // Same page re-shot — signal NearDuplicate so growComponents drops the tile
+        // instead of stacking a second identical page.
         val tx = hom.get(0, 2)[0]
         val ty = hom.get(1, 2)[0]
         val move = hypot(tx, ty)
         val minMove = 0.12 * min(base.mat.cols(), base.mat.rows())
         if (move < minMove) {
-            android.util.Log.i(TIMING_TAG, "pair rejected: near-duplicate move=$move < $minMove")
+            android.util.Log.i(TIMING_TAG, "pair near-duplicate move=$move < $minMove")
             hom.release()
-            return null
+            return PairOutcome.NearDuplicate
         }
-        return ScoredH(hom, inlierCount)
+        return PairOutcome.Align(hom, inlierCount)
     }
 
     private fun affineToHomography(aff2x3: Mat): Mat {
@@ -621,10 +694,10 @@ class OpenCvDocumentStitcher(
     /** Prefer SIFT (in OpenCV 4.9 Maven AAR); ORB fallback. SCANS Stitcher not packaged in AAR. */
     private fun createDetector(): Feature2D {
         return try {
-            // Lower contrastThreshold → more keypoints on cleaned white paper.
-            SIFT.create(0, 3, 0.02, 10.0, 1.6)
+            // Cap nfeatures for speed; lower contrastThreshold for cleaned white paper.
+            SIFT.create(1200, 3, 0.02, 10.0, 1.6)
         } catch (_: Throwable) {
-            ORB.create(4000)
+            ORB.create(2000)
         }
     }
 
@@ -833,6 +906,7 @@ class OpenCvDocumentStitcher(
     /**
      * Heuristic: similar aspect + size → likely overlapping tiles of one sheet
      * (not distinct multi-page docs). Stacking those duplicates content.
+     * Tolerant of ML Kit crop boxes that change height more than width.
      */
     private fun looksLikeSamePageTiles(frames: List<CaptureFrame>): Boolean {
         if (frames.size < 2) return false
@@ -846,8 +920,34 @@ class OpenCvDocumentStitcher(
         }
         val a0 = aspects[0]
         val area0 = areas[0].toDouble()
-        return aspects.all { abs(it - a0) < 0.12f } &&
-            areas.all { abs(it - area0) / area0 < 0.35 }
+        return aspects.all { abs(it - a0) < 0.28f } &&
+            areas.all { abs(it - area0) / area0 < 0.90 }
+    }
+
+    /**
+     * Stack distinct pages; if the stack is only tall copies of one page, keep the best single.
+     * Takes ownership of [mosaics] mats (releases them).
+     */
+    private fun combineMosaicsOrBest(mosaics: List<Mat>): Mat? {
+        if (mosaics.isEmpty()) return null
+        if (mosaics.size == 1) return mosaics[0]
+        val maxH = mosaics.maxOf { it.rows() }
+        val maxW = mosaics.maxOf { it.cols() }
+        val bestSingle = mosaics.maxBy { it.rows().toLong() * it.cols() }.clone()
+        val stacked = stackPages(mosaics)
+        mosaics.forEach { it.release() }
+        if (stacked == null) return bestSingle
+        // Vertical dump of same-page ML Kit re-captures: tall, not wider.
+        if (stacked.rows() > maxH * 1.8 && stacked.cols() <= maxW * 1.15) {
+            android.util.Log.i(
+                TIMING_TAG,
+                "reject duplicate page stack ${stacked.cols()}x${stacked.rows()} — keep best single",
+            )
+            stacked.release()
+            return bestSingle
+        }
+        bestSingle.release()
+        return stacked
     }
 
     /**
@@ -1026,9 +1126,9 @@ class OpenCvDocumentStitcher(
         /**
          * Tiles are merged at this working resolution. Full-res tiles (12MP+) made
          * every union canvas exceed the pixel budget, so no merge could land.
-         * ~2200px long edge ≈ 200dpi for A4 — plenty for OCR.
+         * ~1800px long edge keeps OCR quality while cutting warp/composite cost.
          */
-        private const val WORK_LONG_EDGE = 2200
+        private const val WORK_LONG_EDGE = 1800
 
         /** Keep final mosaic bounded to avoid OOM on mid phones. */
         private const val MAX_MOSAIC_LONG_EDGE = 4800

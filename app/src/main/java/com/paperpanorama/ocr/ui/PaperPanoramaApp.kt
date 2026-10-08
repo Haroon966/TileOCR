@@ -11,13 +11,10 @@ import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -67,7 +64,6 @@ fun PaperPanoramaApp(
     /** True after user taps Allow — ignore dialog dismiss-as-deny while system prompt is up. */
     var awaitingSystemPermission by remember { mutableStateOf(false) }
     var launchSystemPermission by remember { mutableStateOf(false) }
-    var showEarlyFinishConfirm by remember { mutableStateOf(false) }
     var pendingLaunchScanner by remember { mutableStateOf(false) }
 
     fun hasCameraPermission(): Boolean =
@@ -230,9 +226,6 @@ fun PaperPanoramaApp(
                     } else {
                         launchSystemPermission = true
                     }
-                }
-                ScanNavEvent.ConfirmEarlyFinish -> {
-                    showEarlyFinishConfirm = true
                 }
                 is ScanNavEvent.Snackbar -> {
                     snackbarHostState.showSnackbar(event.message)
@@ -437,39 +430,4 @@ fun PaperPanoramaApp(
         )
     }
 
-    if (showEarlyFinishConfirm) {
-        AlertDialog(
-            onDismissRequest = { showEarlyFinishConfirm = false },
-            title = { Text("Finish incomplete page?") },
-            text = {
-                val endsNote = when {
-                    !state.coverage.progressDeterminate ->
-                        " Page ends not both seen yet."
-                    !state.coverage.sawStartEnd || !state.coverage.sawFinishEnd ->
-                        " Page ends not both seen yet."
-                    else -> ""
-                }
-                Text(
-                    "Coverage is ${state.coverage.coveragePercent}%.$endsNote More shots usually improve the stitch. Finish anyway?",
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        showEarlyFinishConfirm = false
-                        viewModel.confirmEarlyFinish()
-                    },
-                ) {
-                    Text("Finish anyway")
-                }
-            },
-            dismissButton = {
-                TextButton(
-                    onClick = { showEarlyFinishConfirm = false },
-                ) {
-                    Text("Keep scanning")
-                }
-            },
-        )
-    }
 }

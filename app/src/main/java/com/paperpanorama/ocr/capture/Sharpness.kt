@@ -27,6 +27,6 @@ object Sharpness {
         return (s * s).toFloat()
     }
 
-    /** Reject stills softer than this (empirically OK for downscaled ~1200px docs). */
-    const val MIN_ACCEPT = 25f
+    /** Reject stills softer than this (Soft band is MIN_ACCEPT..<SHARP_THRESHOLD). */
+    const val MIN_ACCEPT = 35f
 }

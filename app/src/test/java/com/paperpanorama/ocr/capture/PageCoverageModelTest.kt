@@ -50,7 +50,22 @@ class PageCoverageModelTest {
         assertTrue(m.allLocked())
         assertTrue(m.snapshot().readyToFinish)
         assertEquals(CoverageSnapshot.TILE_COUNT, m.lockedCount())
-        assertTrue(m.snapshot().nextHint.contains("Done", ignoreCase = true))
+        assertEquals(100, m.snapshot().coveragePercent)
+        assertTrue(m.snapshot().nextHint.contains("stitching", ignoreCase = true))
+    }
+
+    @Test
+    fun halfLockedWithTwoStills_notReady() {
+        val m = PageCoverageModel()
+        m.markPageMapped(0f, 0f, 800f, 1200f)
+        // Lock left half only (~48 cells).
+        m.paintRect(PageCoverageModel.PageRect(0f, 0f, 400f, 1200f), 80f)
+        m.onStillAccepted()
+        m.onStillAccepted()
+        assertTrue(m.lockedCount() >= CoverageSnapshot.TILE_COUNT / 2)
+        assertTrue(m.lockedCount() < CoverageSnapshot.TILE_COUNT)
+        assertFalse(m.snapshot().readyToFinish)
+        assertTrue(m.snapshot().coveragePercent < 100)
     }
 
     @Test

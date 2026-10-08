@@ -56,8 +56,6 @@ import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.GridOff
 import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
@@ -173,6 +171,7 @@ fun CameraScreen(
         }
         val imageAnalysis = remember {
             ImageAnalysis.Builder()
+                .setTargetResolution(android.util.Size(640, 480))
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
                 .build()
@@ -185,6 +184,7 @@ fun CameraScreen(
         var shaky by remember { mutableStateOf(false) }
         var needsMove by remember { mutableStateOf(false) }
         var autoCapturing by remember { mutableStateOf(false) }
+        var autoAdvanced by remember { mutableStateOf(false) }
         var pendingTile by remember { mutableIntStateOf(-1) }
         var liveHint by remember { mutableStateOf(LivePageHint.Idle) }
         val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
@@ -371,6 +371,14 @@ fun CameraScreen(
             }
         }
 
+        // Auto-advance to stitch once when the full grid is Locked.
+        LaunchedEffect(coverage.readyToFinish) {
+            if (coverage.readyToFinish && !autoAdvanced && frames.isNotEmpty()) {
+                autoAdvanced = true
+                onDonePanorama()
+            }
+        }
+
         LaunchedEffect(featureWarn) {
             featureWarn?.let {
                 snackbar.showSnackbar(it)
@@ -529,7 +537,7 @@ fun CameraScreen(
                 if (mode == CaptureMode.Panorama) {
                     val coachHint = when {
                         coverage.readyToFinish ->
-                            "All cells locked — tap Done to stitch"
+                            "Page complete — stitching…"
                         autoCapturing || isIngestingCapture -> "Capturing…"
                         liveHint.activeTileAligned ->
                             "Hold still — capturing ${CoverageSnapshot.tileLabel(coverage.activeTileIndex)}"
@@ -623,9 +631,10 @@ fun CameraScreen(
                 if (mode == CaptureMode.Panorama && frames.isNotEmpty()) {
                     Text(
                         text = if (coverage.readyToFinish) {
-                            "Page grid locked — tap Done when you want to stitch"
+                            "Page complete — stitching…"
                         } else {
-                            "${frames.size} photo${if (frames.size == 1) "" else "s"} — tap Done anytime to stitch"
+                            "${frames.size} photo${if (frames.size == 1) "" else "s"} — " +
+                                "${coverage.lockedCellCount}/${CoverageSnapshot.TILE_COUNT} locked"
                         },
                         style = MaterialTheme.typography.labelLarge,
                         color = Lime400,
@@ -649,18 +658,6 @@ fun CameraScreen(
                         onModeChange(CaptureMode.Single)
                     }
                     Spacer(modifier = Modifier.weight(1f))
-                    if (mode == CaptureMode.Panorama && frames.isNotEmpty()) {
-                        Button(
-                            onClick = onDonePanorama,
-                            enabled = !isIngestingCapture && !autoCapturing,
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = Lime400,
-                                contentColor = Ink,
-                            ),
-                        ) {
-                            Text("Done")
-                        }
-                    }
                 }
 
                 Box(
@@ -728,7 +725,7 @@ fun CameraScreen(
                             Spacer(modifier = Modifier.height(8.dp))
                             Text(
                                 text = when {
-                                    coverage.readyToFinish -> "Ready — tap Done"
+                                    coverage.readyToFinish -> "Page complete — stitching…"
                                     autoCapturing || isIngestingCapture -> "Capturing…"
                                     needsMove && frames.isNotEmpty() -> "Move camera"
                                     else -> "Hold still to capture"

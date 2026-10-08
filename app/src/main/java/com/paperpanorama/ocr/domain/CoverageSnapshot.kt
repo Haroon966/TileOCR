@@ -2,7 +2,7 @@ package com.paperpanorama.ocr.domain
 
 /**
  * Whole-page 8×12 guided scan coach.
- * [readyToFinish] = grid fully Locked, or ≥50% locked with ≥2 stills — user may Done anytime in camera UI.
+ * [readyToFinish] = every cell Locked (sharp); camera auto-advances to stitch.
  */
 data class CoverageSnapshot(
     val coveragePercent: Int = 0,

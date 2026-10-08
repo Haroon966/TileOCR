@@ -254,10 +254,9 @@ class CoverageTracker(private val context: Context) {
     }
 
     private fun loadWork(path: String): Mat? {
-        val full = Imgcodecs.imread(path, Imgcodecs.IMREAD_COLOR)
-        if (full.empty()) {
-            full.release()
-            val bmp = BitmapDecode.decodeDownsampled(path, WORK_LONG_EDGE) ?: return null
+        // Prefer subsampled decode — avoid full-res imread then resize.
+        val bmp = BitmapDecode.decodeDownsampled(path, WORK_LONG_EDGE)
+        if (bmp != null) {
             val rgba = Mat()
             org.opencv.android.Utils.bitmapToMat(bmp, rgba)
             bmp.recycle()
@@ -265,6 +264,11 @@ class CoverageTracker(private val context: Context) {
             Imgproc.cvtColor(rgba, bgr, Imgproc.COLOR_RGBA2BGR)
             rgba.release()
             return ensureMax(bgr, WORK_LONG_EDGE)
+        }
+        val full = Imgcodecs.imread(path, Imgcodecs.IMREAD_COLOR)
+        if (full.empty()) {
+            full.release()
+            return null
         }
         return ensureMax(full, WORK_LONG_EDGE)
     }

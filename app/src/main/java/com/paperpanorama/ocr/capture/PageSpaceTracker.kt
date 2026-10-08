@@ -13,13 +13,13 @@ import org.opencv.core.MatOfPoint2f
 import org.opencv.core.Point
 import org.opencv.features2d.BFMatcher
 import org.opencv.features2d.ORB
-import org.opencv.features2d.SIFT
 import org.opencv.imgproc.Imgproc
 import kotlin.math.hypot
 
 /**
  * Freezes the page rectangle in a seed frame and tracks later frames via affine
  * so an 8×12 grid stays stable while the user zooms into regions.
+ * Live path uses ORB only (SIFT stays in the stitcher for still matching).
  */
 class PageSpaceTracker {
     private var seedGray: Mat? = null
@@ -27,6 +27,7 @@ class PageSpaceTracker {
     private var seedDesc: Mat? = null
     private var seedW = 0
     private var seedH = 0
+    private var orb: ORB? = null
 
     /** Page AABB in seed pixel coords. */
     var pageMinX = 0f
@@ -206,16 +207,11 @@ class PageSpaceTracker {
         }
         val knn = mutableListOf<MatOfDMatch>()
         try {
-            BFMatcher.create(Core.NORM_L2, false).knnMatch(seedD, desc, knn, 2)
+            BFMatcher.create(Core.NORM_HAMMING, false).knnMatch(seedD, desc, knn, 2)
         } catch (_: Throwable) {
-            knn.clear()
-            try {
-                BFMatcher.create(Core.NORM_HAMMING, false).knnMatch(seedD, desc, knn, 2)
-            } catch (_: Throwable) {
-                kp.release()
-                desc.release()
-                return null
-            }
+            kp.release()
+            desc.release()
+            return null
         }
         val good = mutableListOf<DMatch>()
         for (m in knn) {
@@ -376,11 +372,8 @@ class PageSpaceTracker {
         seedDesc = desc
     }
 
-    private fun detector() = try {
-        SIFT.create(0, 3, 0.04, 10.0, 1.6)
-    } catch (_: Throwable) {
-        ORB.create(1200)
-    }
+    private fun detector(): ORB =
+        orb ?: ORB.create(1200).also { orb = it }
 
     private fun releaseSeed() {
         seedGray?.release()

@@ -34,13 +34,18 @@ import com.paperpanorama.ocr.util.BitmapDecode
 import com.paperpanorama.ocr.util.MediaSaver
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.File
 import kotlin.math.roundToInt
@@ -499,7 +504,7 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** User taps Done — every cell Locked. */
+    /** Auto-advance or Done when every cell is Locked. */
     fun onPanoramaDone(force: Boolean = false) {
         val frames = _state.value.frames
         val ready = _state.value.coverage.readyToFinish
@@ -511,15 +516,12 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
         }
         if (!force && !ready) {
             viewModelScope.launch {
-                navChannel.send(ScanNavEvent.ConfirmEarlyFinish)
+                navChannel.send(
+                    ScanNavEvent.Snackbar("Keep scanning until every cell is green"),
+                )
             }
             return
         }
-        beginStitch()
-    }
-
-    fun confirmEarlyFinish() {
-        if (_state.value.frames.isEmpty()) return
         beginStitch()
     }
 
@@ -541,7 +543,15 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
             }
             navChannel.send(ScanNavEvent.ToStitching)
 
-            val normalized = _state.value.frames.map { normalizer.normalizeForStitch(it) }
+            val framesSnapshot = _state.value.frames
+            val normalized = coroutineScope {
+                val gate = Semaphore(NORMALIZE_CONCURRENCY)
+                framesSnapshot.map { frame ->
+                    async(Dispatchers.Default) {
+                        gate.withPermit { normalizer.normalizeForStitch(frame) }
+                    }
+                }.awaitAll()
+            }
             _state.update { it.copy(frames = normalized) }
 
             val result = try {
@@ -1286,5 +1296,6 @@ class ScanSessionViewModel(app: Application) : AndroidViewModel(app) {
 
     companion object {
         const val MIN_FEATURES = 40
+        private const val NORMALIZE_CONCURRENCY = 2
     }
 }

@@ -188,8 +188,8 @@ class PageCoverageModel(
         val locked = lockedCount()
         val soft = softCount()
         val empty = emptyCount()
-        // Full grid lock OR enough locked cells + stills — user may Done anytime in UI too.
-        val ready = allLocked() || (pageMapped && lockedCount() >= (cellCount + 1) / 2 && acceptedStills >= 2)
+        // Strict: every cell Locked before auto-stitch advances.
+        val ready = allLocked()
         val target = nextTarget()
         val active = activeCellIndex()
         val cells = cellStates()
@@ -200,7 +200,7 @@ class PageCoverageModel(
             pullBack && !pageMapped -> "Pull back so the whole page shows with margins"
             pullBack -> "Ease back a little — keep page edges in view"
             !pageMapped -> "Frame the whole page so the 8×12 grid can lock on"
-            ready -> "All tiles sharp — tap Done to stitch"
+            ready -> "Page complete — stitching…"
             soft > 0 -> "Move closer to the red (soft) region and hold still"
             else -> "Move closer to the missing region and hold still ($locked/$cellCount)"
         }
@@ -312,7 +312,7 @@ class PageCoverageModel(
         const val GRID_COLS = CoverageSnapshot.GRID_COLS
         const val GRID_ROWS = CoverageSnapshot.GRID_ROWS
         const val BAND_COUNT = GRID_COLS * GRID_ROWS
-        const val SHARP_THRESHOLD = 40f
+        const val SHARP_THRESHOLD = 55f
         const val UNCOVERED = -1f
         const val IMPROVE_EPS = 8f
     }

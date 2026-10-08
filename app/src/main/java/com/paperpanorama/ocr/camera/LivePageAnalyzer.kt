@@ -35,6 +35,9 @@ class LivePageAnalyzer(
     private val trackerRef = AtomicReference<PageSpaceTracker?>(null)
     private val alignStreak = AtomicInteger(0)
     private var lastGoodHint: LivePageHint = LivePageHint.Idle
+    private var orbCounter: ORB? = null
+    private val orbFrameCounter = AtomicInteger(0)
+    private var lastOrbCount = 0
 
     fun setPageSpaceTracker(tracker: PageSpaceTracker?) {
         trackerRef.set(tracker)
@@ -51,7 +54,9 @@ class LivePageAnalyzer(
     override fun analyze(image: ImageProxy) {
         try {
             val now = System.currentTimeMillis()
-            if (now - lastAnalysisMs.get() < MIN_INTERVAL_MS) return
+            val locked = trackerRef.get()?.isLocked == true
+            val minInterval = if (locked) MIN_INTERVAL_MAPPED_MS else MIN_INTERVAL_MS
+            if (now - lastAnalysisMs.get() < minInterval) return
             lastAnalysisMs.set(now)
             if (!OpenCvBootstrap.ensureInitialized()) {
                 onHint(LivePageHint.Idle.copy(hint = "Vision engine loading…", featuresOk = false))
@@ -83,7 +88,8 @@ class LivePageAnalyzer(
 
     private fun processFrame(small: Mat) {
         val tracker = trackerRef.get()
-        val features = countOrb(small)
+        val locked = tracker != null && tracker.isLocked
+        val features = countOrb(small, locked)
 
         // Phase B: tracker already locked — track grid, do not re-split AABB.
         if (tracker != null && tracker.isLocked) {
@@ -237,13 +243,18 @@ class LivePageAnalyzer(
         return recentIous.size >= IOU_WINDOW && recentIous.all { it >= IOU_STABLE }
     }
 
-    private fun countOrb(gray: Mat): Int {
+    private fun countOrb(gray: Mat, locked: Boolean): Int {
+        if (locked) {
+            val n = orbFrameCounter.incrementAndGet()
+            if (n % 3 != 1) return lastOrbCount
+        }
         val kp = MatOfKeyPoint()
         return try {
-            ORB.create(200).detect(gray, kp)
-            kp.toArray().size
+            val orb = orbCounter ?: ORB.create(200).also { orbCounter = it }
+            orb.detect(gray, kp)
+            kp.toArray().size.also { lastOrbCount = it }
         } catch (_: Throwable) {
-            0
+            lastOrbCount
         } finally {
             kp.release()
         }
@@ -322,6 +333,7 @@ class LivePageAnalyzer(
 
     companion object {
         private const val MIN_INTERVAL_MS = 200L
+        private const val MIN_INTERVAL_MAPPED_MS = 280L
         private const val WORK_EDGE = 480
         private const val IOU_WINDOW = 3
         private const val IOU_STABLE = 0.85f
